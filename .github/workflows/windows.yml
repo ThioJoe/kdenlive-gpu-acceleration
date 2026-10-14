@@ -114,9 +114,7 @@ jobs:
       - name: Check the settings page against Kdenlive's libraries
         run: |
           bin="$(cygpath -u "$KDENLIVE_ROOT")/bin"
-          for name in Qt6Core libKF6ConfigCore; do
-            echo "$name: Kdenlive $(powershell -NoProfile -Command "(Get-Item '$(cygpath -w "$bin/$name.dll")').VersionInfo.ProductVersion"), built with $(powershell -NoProfile -Command "(Get-Item '$(cygpath -w "/ucrt64/bin/$name.dll")').VersionInfo.ProductVersion")"
-          done
+          echo "Qt: Kdenlive $(powershell -NoProfile -Command "(Get-Item '$(cygpath -w "$bin/Qt6Core.dll")').VersionInfo.ProductVersion"), built with $(powershell -NoProfile -Command "(Get-Item '$(cygpath -w /ucrt64/bin/Qt6Core.dll)').VersionInfo.ProductVersion")"
           check_imports() {
             local file=$1 status=0
             for dll in $(objdump -p "$file" | awk '/DLL Name:/ {print $3}'); do
@@ -128,14 +126,23 @@ jobs:
                 status=1
                 continue
               fi
-              # Imported names of this DLL, and the names Kdenlive's copy
-              # exports (objdump writes Windows line ends)
-              objdump -p "$file" | awk -v dll="$dll" '{sub(/\r$/, "")} /DLL Name:/ {inside = ($3 == dll); next} inside && /^\t[0-9a-f]+\t/ {print $NF}' | sort -u > imports.txt
-              objdump -p "$bin/$dll" | awk '{sub(/\r$/, "")} /^\t\[ *[0-9]+\] / {print $NF}' | sort -u > exports.txt
+              # Imported names of this DLL (lines of address, hint and name
+              # after its "DLL Name"), and the names Kdenlive's copy exports
+              objdump -p "$file" | tr -d '\r' | awk -v dll="$dll" '
+                /DLL Name:/ {inside = ($3 == dll); next}
+                /^[ \t]*$/ {inside = 0}
+                inside && NF >= 3 && $1 ~ /^[0-9a-fA-F]+$/ && $2 ~ /^[0-9]+$/ {print $NF}' | sort -u > imports.txt
+              objdump -p "$bin/$dll" | tr -d '\r' | awk '/^[ \t]*\[ *[0-9]+\]/ {print $NF}' | sort -u > exports.txt
               missing=$(comm -23 imports.txt exports.txt)
               echo "$(basename "$file") -> $dll: $(wc -l < imports.txt) functions"
+              if [ ! -s exports.txt ]; then
+                echo "::error::No function found in the exports of Kdenlive's $dll"
+                objdump -p "$bin/$dll" | grep -A 4 "Ordinal/Name Pointer" | cat -A
+                status=1
+              fi
               if [ ! -s imports.txt ]; then
                 echo "::error::No function found in the imports of $(basename "$file") from $dll"
+                objdump -p "$file" | grep -A 4 "DLL Name: $dll" | cat -A
                 status=1
               fi
               if [ -n "$missing" ]; then
