@@ -18,6 +18,7 @@ endif()
 add_executable(gpufx_test test_gpufx.cpp)
 set_target_properties(gpufx_test PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 target_link_libraries(gpufx_test PRIVATE Mlt7::mlt ${CMAKE_DL_LIBS})
+target_include_directories(gpufx_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_compile_definitions(gpufx_test PRIVATE
     GPUFX_TEST_MODULE="$<TARGET_FILE:mltgpufx>"
     GPUFX_TEST_CUDA_LIBRARY="$<TARGET_FILE:gpufx_mockcuda>"
@@ -26,5 +27,22 @@ add_dependencies(gpufx_test mltgpufx gpufx_mockcuda)
 
 add_test(NAME gpufx COMMAND gpufx_test)
 add_test(NAME gpufx_no_gpu COMMAND gpufx_test --no-gpu)
-set_tests_properties(gpufx PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_test(NAME gpufx_settings_off COMMAND gpufx_test --settings-off)
+set_tests_properties(gpufx gpufx_settings_off PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 set_tests_properties(gpufx_no_gpu PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MOCKCUDA_NO_DEVICE=1")
+
+# The settings page in a settings dialog made like Kdenlive's
+if(TARGET gpufx-settings)
+    add_executable(gpufx_settings_test test_settings_page.cpp)
+    set_target_properties(gpufx_settings_test PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    target_include_directories(gpufx_settings_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(gpufx_settings_test PRIVATE Qt6::Widgets KF6::ConfigWidgets KF6::ConfigCore Mlt7::mlt ${CMAKE_DL_LIBS})
+    target_compile_definitions(gpufx_settings_test PRIVATE
+        QT_NO_VERSION_TAGGING
+        GPUFX_TEST_MODULE="$<TARGET_FILE:mltgpufx>"
+        GPUFX_TEST_CUDA_LIBRARY="$<TARGET_FILE:gpufx_mockcuda>"
+    )
+    add_dependencies(gpufx_settings_test mltgpufx gpufx-settings gpufx_mockcuda)
+    add_test(NAME gpufx_settings_page COMMAND gpufx_settings_test)
+    set_tests_properties(gpufx_settings_page PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()

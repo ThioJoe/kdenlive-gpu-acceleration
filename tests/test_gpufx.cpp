@@ -14,11 +14,14 @@
  * driver (libcuda.so.1 / nvcuda.dll) runs the same comparisons on an actual
  * NVIDIA GPU; the checks that need the emulator are then skipped.
  *
- * Usage: gpufx_test [--no-gpu]
+ * Usage: gpufx_test [--no-gpu | --settings-off]
  *   --no-gpu: expect CUDA to be unavailable (run with MOCKCUDA_NO_DEVICE=1)
+ *   --settings-off: start with GPU processing turned off in the settings file,
+ *   and only check that the module then leaves MLT alone
  */
 
 #include "mockcuda/mockcuda.h"
+#include "settings_page_api.h"
 
 #include <framework/mlt.h>
 
@@ -38,15 +41,22 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <process.h>
 #include <windows.h>
+#define getpid _getpid
 #else
 #include <dlfcn.h>
+#include <unistd.h>
 #endif
 
 namespace {
 
 int g_failures = 0;
 int g_checks = 0;
+/** The module, as loaded by MLT or by the tests */
+void *g_module = nullptr;
+/** The settings file the module reads (GPUFX_CONFIG_FILE) */
+std::string g_settingsFile;
 
 void check(bool condition, const char *format, ...)
 {
@@ -79,6 +89,36 @@ void *findSymbol(void *library, const char *name)
 #else
     return dlsym(library, name);
 #endif
+}
+
+void setEnvironment(const char *name, const char *value)
+{
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+void writeText(const std::string &path, const char *text)
+{
+    if (FILE *file = fopen(path.c_str(), "wb")) {
+        fputs(text, file);
+        fclose(file);
+    }
+}
+
+/** The handle of the module MLT loaded from its module folder */
+void *findLoadedModule(mlt_repository repository)
+{
+    auto properties = reinterpret_cast<mlt_properties>(repository);
+    for (int i = 0; i < mlt_properties_count(properties); ++i) {
+        const char *name = mlt_properties_get_name(properties, i);
+        if (name && (strstr(name, "libmltgpufx.so") || strstr(name, "libmltgpufx.dll"))) {
+            return mlt_properties_get_data_at(properties, i, nullptr);
+        }
+    }
+    return nullptr;
 }
 
 struct Mock
@@ -1232,6 +1272,111 @@ void testGlobalSwitch(mlt_profile profile)
     g_mock.reset();
     render(profile, {{"dropshadow", {{"radius", "5"}}}}, makeImage(40, 30, 0), false);
     check(g_mock.stats().launches > 0, "gpufx.enabled=1 did not turn GPU processing back on");
+    // Back to the settings file
+    mlt_properties_set(mlt_global_properties(), "gpufx.enabled", "");
+}
+
+struct ModuleStatus
+{
+    int enabled = -1;
+    int hooked = -1;
+    std::string effects;
+    std::string transitions;
+    std::string conversions;
+};
+
+ModuleStatus moduleStatus(mlt_profile profile)
+{
+    ModuleStatus result;
+    if (mlt_filter status = mlt_factory_filter(profile, "gpufx", "noinit")) {
+        mlt_properties properties = MLT_FILTER_PROPERTIES(status);
+        result.enabled = mlt_properties_get_int(properties, "enabled");
+        result.hooked = mlt_properties_get_int(properties, "hooked");
+        result.effects = std::string(",") + mlt_properties_get(properties, "effects") + ",";
+        result.transitions = std::string(",") + mlt_properties_get(properties, "transitions") + ",";
+        result.conversions = std::string(",") + mlt_properties_get(properties, "conversions") + ",";
+        mlt_filter_close(status);
+    }
+    return result;
+}
+
+/** The settings the settings page saves in Kdenlive's settings file */
+void testSettingsFile(mlt_profile profile, bool expectGpu)
+{
+    using GetHost = const gpufx_settings_host *(*)();
+    auto getHost = g_module ? reinterpret_cast<GetHost>(findSymbol(g_module, "gpufx_get_settings_host")) : nullptr;
+    check(getHost != nullptr, "the module does not export gpufx_get_settings_host()");
+    const gpufx_settings_host *host = getHost ? getHost() : nullptr;
+    if (!host) {
+        return;
+    }
+    check(host->version == GPUFX_SETTINGS_API_VERSION && !strcmp(host->group, "gpufx"), "settings host: version %d, group %s", host->version, host->group);
+    const std::string services = std::string(",") + host->services + ",";
+    for (const char *service : {",effect:dropshadow,", ",effect:qtblend,", ",transition:qtblend,", ",conversion:avformat,", ",conversion:avcolor_space,"}) {
+        check(services.find(service) != std::string::npos, "settings host: %s is not in the services %s", service, host->services);
+    }
+    char text[1024];
+    host->describe_gpu(text, sizeof(text));
+    printf("describe_gpu: %s", text);
+    check(strstr(text, expectGpu ? "available=1\n" : "available=0\n") && strstr(text, "\nstatus=") && strstr(text, "\nmemory_mb="),
+          "describe_gpu: unexpected description");
+
+    ModuleStatus status = moduleStatus(profile);
+    check(status.enabled == 1 && status.hooked == 1, "settings: the module starts with enabled=%d hooked=%d", status.enabled, status.hooked);
+
+    writeText(g_settingsFile, "[gpufx]\nenabled=false\n");
+    host->reload_settings();
+    status = moduleStatus(profile);
+    check(status.enabled == 0, "settings: enabled=false did not turn GPU processing off");
+    if (g_mock.active() && hasFilter("dropshadow")) {
+        g_mock.reset();
+        expectSame(profile, {{"dropshadow", {{"radius", "5"}}}}, makeImage(40, 30, 0), false);
+        check(g_mock.stats().launches == 0, "settings: the GPU was used with enabled=false");
+    }
+
+    // KConfig's format: other groups, nested groups, options, CRLF line ends
+    writeText(g_settingsFile, "# comment\n[other]\nenabled=false\neffect:frei0r.glow=false\n[gpufx][nested]\nenabled=false\n"
+                              "[gpufx]\r\nenabled = true\r\neffect:dropshadow=false\ntransition:qtblend=off\neffect:box_blur[$i]=false\n"
+                              "effect:boxblur[de]=false\neffect:brightness[$d]=false\nconversion:avformat=0\neffect:frei0r.sharpness=true\n");
+    host->reload_settings();
+    status = moduleStatus(profile);
+    check(status.enabled == 1, "settings: enabled = true was not read");
+    check(status.effects.find(",dropshadow,") == std::string::npos && status.effects.find(",box_blur,") == std::string::npos,
+          "settings: dropshadow and box_blur are still on the GPU: %s", status.effects.c_str());
+    check(status.effects.find(",qtblend,") != std::string::npos && status.effects.find(",boxblur,") != std::string::npos
+              && status.effects.find(",brightness,") != std::string::npos && status.effects.find(",frei0r.glow,") != std::string::npos
+              && status.effects.find(",frei0r.sharpness,") != std::string::npos,
+          "settings: effects missing from the GPU: %s", status.effects.c_str());
+    check(status.transitions == ",,", "settings: transition:qtblend=off was not read: %s", status.transitions.c_str());
+    check(status.conversions == ",avcolor_space,", "settings: conversion:avformat=0 was not read: %s", status.conversions.c_str());
+    if (g_mock.active() && hasFilter("dropshadow") && hasFilter("boxblur")) {
+        g_mock.reset();
+        expectSame(profile, {{"dropshadow", {{"radius", "5"}}}}, makeImage(40, 30, 0), false);
+        check(g_mock.stats().launches == 0, "settings: dropshadow ran on the GPU");
+        g_mock.reset();
+        render(profile, {{"boxblur", {{"blur", "3"}}}}, makeImage(40, 30, 0), false);
+        check(g_mock.stats().launches > 0, "settings: boxblur did not run on the GPU");
+    }
+
+    // No file: the defaults
+    remove(g_settingsFile.c_str());
+    host->reload_settings();
+    status = moduleStatus(profile);
+    check(status.enabled == 1 && status.effects.find(",dropshadow,") != std::string::npos && status.transitions == ",qtblend,"
+              && status.conversions == ",avformat,avcolor_space,",
+          "settings: the defaults did not come back without a file");
+}
+
+/** GPU processing turned off in the settings when the module was loaded */
+void testSettingsOff(mlt_profile profile)
+{
+    const ModuleStatus status = moduleStatus(profile);
+    check(status.enabled == 0 && status.hooked == 0, "settings off: enabled=%d hooked=%d", status.enabled, status.hooked);
+    if (g_mock.active() && hasFilter("dropshadow")) {
+        g_mock.reset();
+        expectSame(profile, {{"dropshadow", {{"radius", "5"}}}}, makeImage(40, 30, 0), false);
+        check(g_mock.stats().launches == 0, "settings off: the GPU was used");
+    }
 }
 
 /** Must run last: a launch failure turns the GPU off for the session. */
@@ -1269,9 +1414,12 @@ void testFailures(mlt_profile profile)
 int main(int argc, char **argv)
 {
     bool expectGpu = true;
+    bool settingsOff = false;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--no-gpu")) {
             expectGpu = false;
+        } else if (!strcmp(argv[i], "--settings-off")) {
+            settingsOff = true;
         }
     }
 #if !defined(_WIN32)
@@ -1285,6 +1433,15 @@ int main(int argc, char **argv)
     }
 #endif
 
+    // A settings file of the tests' own instead of Kdenlive's
+    g_settingsFile = (std::filesystem::temp_directory_path() / ("gpufx_test_" + std::to_string(getpid()) + "rc")).string();
+    setEnvironment("GPUFX_CONFIG_FILE", g_settingsFile.c_str());
+    if (settingsOff) {
+        writeText(g_settingsFile, "[gpufx]\nenabled=false\n");
+    } else {
+        remove(g_settingsFile.c_str());
+    }
+
     // MLT on Windows looks for its modules next to the executable and ignores
     // MLT_REPOSITORY unless it is passed here
     mlt_repository repository = mlt_factory_init(getenv("MLT_REPOSITORY"));
@@ -1297,13 +1454,15 @@ int main(int argc, char **argv)
     }
     // Register the module from the build tree, unless MLT already loaded it
     if (!mlt_properties_get_data(mlt_repository_filters(repository), "gpufx", nullptr)) {
-        void *module = openLibrary(GPUFX_TEST_MODULE);
-        auto registerModule = module ? reinterpret_cast<void (*)(mlt_repository)>(findSymbol(module, "mlt_register")) : nullptr;
+        g_module = openLibrary(GPUFX_TEST_MODULE);
+        auto registerModule = g_module ? reinterpret_cast<void (*)(mlt_repository)>(findSymbol(g_module, "mlt_register")) : nullptr;
         if (!registerModule) {
             fprintf(stderr, "cannot load %s\n", GPUFX_TEST_MODULE);
             return 2;
         }
         registerModule(repository);
+    } else {
+        g_module = findLoadedModule(repository);
     }
     if (void *driver = openLibrary(getenv("GPUFX_CUDA_LIBRARY"))) {
         g_mock.getStats = reinterpret_cast<MockCudaGetStats>(findSymbol(driver, "mockcuda_get_stats"));
@@ -1322,6 +1481,15 @@ int main(int argc, char **argv)
     profile->display_aspect_num = 16;
     profile->display_aspect_den = 9;
 
+    if (settingsOff) {
+        testSettingsOff(profile);
+        printf("%d checks, %d failures\n", g_checks, g_failures);
+        remove(g_settingsFile.c_str());
+        mlt_profile_close(profile);
+        mlt_factory_close();
+        return g_failures ? 1 : 0;
+    }
+
     testStatus(profile, expectGpu);
     testDropShadow(profile);
     testBoxBlur(profile);
@@ -1335,6 +1503,7 @@ int main(int argc, char **argv)
     testDecoding(profile);
     testYuvOutput(profile);
     testGlobalSwitch(profile);
+    testSettingsFile(profile, expectGpu);
     testFailures(profile);
 
     if (g_mock.active()) {

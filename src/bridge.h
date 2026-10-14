@@ -19,9 +19,11 @@ void wrapTransition(mlt_transition transition, const TransitionDescriptor &descr
  *  converts the decoded pictures to RGBA on the GPU. */
 void wrapProducer(mlt_producer producer);
 
-/** Module wide switches (environment, MLT global properties, per service). */
+/** Module wide switches (environment, settings, MLT global properties, per
+ *  service). kind is "effect", "transition" or "conversion" (avformat for the
+ *  decoding to RGBA, avcolor_space for the conversion to YUV). */
 bool moduleEnabled();
-bool serviceEnabled(const char *service);
+bool serviceEnabled(const char *kind, const char *service);
 bool effectEnabled(const EffectDescriptor &effect);
 
 } // namespace gpufx

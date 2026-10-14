@@ -13,7 +13,8 @@ or without an NVIDIA GPU.
 Kdenlive itself is not modified. The module is one library that goes into
 MLT's module folder of an installed Kdenlive (`lib\mlt` on Windows), and it
 is used by every process that loads MLT from there: Kdenlive itself (monitors,
-timeline preview) and the render processes.
+timeline preview) and the render processes. A second library adds a page to
+Kdenlive's settings dialog for it (see [Settings](#settings)).
 
 ## Installing on Windows
 
@@ -23,7 +24,8 @@ like Kdenlive's folder. Open the latest run under *Actions*, download
 `gpufx-kdenlive-<version>-windows` and unzip it, then drag its
 `kdenlive-<version>_standalone` folder into the folder that contains your
 Kdenlive folder and let Windows merge them. It adds
-`lib\mlt\libmltgpufx.dll`. To uninstall, delete that file.
+`lib\mlt\libmltgpufx.dll` and `lib\mlt\gpufx\gpufx-settings.dll`. To
+uninstall, delete `libmltgpufx.dll` and the `gpufx` folder.
 
 ## Accelerated effects
 
@@ -147,12 +149,41 @@ CPU as usual.
 
 ## Settings
 
-The module is controlled with environment variables, which the processes
-Kdenlive starts (renders, timeline preview) inherit:
+Kdenlive's settings (*Settings > Configure Kdenlive*) get a *GPU Acceleration*
+page. It shows the GPU the module uses, turns GPU processing on or off, and
+keeps chosen effects, compositing or conversions on the CPU. Changes apply to
+the monitor right away and to renders started afterwards.
+
+The page is a library of its own, `gpufx/gpufx-settings.dll` next to the
+module, because it needs Qt and KDE Frameworks while the module only needs
+MLT. The module loads it only in Kdenlive's main program, which has those
+libraries loaded already: render processes and other programs using MLT never
+load it, and MLT does not look into the `gpufx` folder. When Kdenlive's
+settings dialog (a `KConfigDialog`) opens, the page adds itself with
+`KConfigDialog::addPage()`, with its own settings object, so the dialog's OK,
+Apply, Cancel and Defaults buttons handle it like Kdenlive's own pages.
+
+The settings are saved in Kdenlive's settings file (`kdenliverc` in
+`%LOCALAPPDATA%` on Windows, in `~/.config` elsewhere), in a `[gpufx]` group:
+
+| Entry                       | Effect |
+|-----------------------------|--------|
+| `enabled=false`             | GPU processing off |
+| `effect:<service>=false`    | Keep the effect with this MLT service on the CPU, e.g. `effect:dropshadow` |
+| `transition:qtblend=false`  | Keep track compositing on the CPU |
+| `conversion:avformat=false` | Keep the decoding of video to RGBA on the CPU (`conversion:avcolor_space` for the output conversion to YUV) |
+
+Every process using the module reads them when it starts, and Kdenlive again
+when the settings are applied. With GPU processing off, render processes
+leave MLT alone entirely.
+
+The module also reads these environment variables:
 
 | Variable                  | Effect |
 |---------------------------|--------|
-| `MLT_GPUFX=0`             | Do not touch any filter |
+| `MLT_GPUFX=0`             | Do not touch any filter, and no settings page |
+| `GPUFX_CONFIG_FILE`       | The settings file to read instead of `kdenliverc`. The settings page sets it to Kdenlive's actual settings file (`kdenlive-appimagerc` for the AppImage, for example), and the processes Kdenlive starts inherit it |
+| `GPUFX_SETTINGS_PAGE=0`   | Do not load the settings page (`1` loads it in any program, for tests) |
 | `MLT_GPUFX_DISABLE`       | Comma separated MLT services to keep on the CPU, e.g. `dropshadow,box_blur`. `avformat` and `avcolor_space` stand for the two image conversions |
 | `MLT_GPUFX_DEBUG=1`       | Log every frame processed on the GPU (MLT info log level) |
 | `MLT_GPUFX_QTBLEND=force` | Accelerate Transform with MLT versions newer than the module knows |
@@ -160,13 +191,16 @@ Kdenlive starts (renders, timeline preview) inherit:
 | `GPUFX_POOL_MB=n`         | Size of the GPU memory kept for reuse (default: 1/8 of the GPU memory, at most 1 GiB) |
 
 Applications linking MLT can also set the MLT global property
-`gpufx.enabled` to `0` or `1` at any time. Creating the `gpufx` filter
-service returns a filter whose properties describe the state of the module
-(`available`, `status`, `device`, `effects`, `gpu_frames`, ...).
+`gpufx.enabled` to `0` or `1` at any time, which overrides the settings file.
+Creating the `gpufx` filter service returns a filter whose properties describe
+the state of the module (`available`, `status`, `device`, `effects`,
+`gpu_frames`, ...).
 
 ## Building
 
-The module only depends on MLT:
+The module only depends on MLT. The settings page needs Qt 6 and KDE
+Frameworks 6 (KConfig and KConfigWidgets): it is built when they are found,
+unless `GPUFX_SETTINGS_PAGE` is `OFF`.
 
 ```
 cmake -S . -B build
@@ -189,10 +223,13 @@ UCRT (not the older `msvcrt.dll`), such as MSYS2's UCRT64 environment.
 
 The Windows workflow does this for Kdenlive's Windows standalone build: it
 compiles the module with MSYS2's UCRT toolchain against the `libmlt-7.dll` of
-the official build, runs the tests inside that build with the emulated GPU,
-and uploads the module in a `kdenlive-<version>_standalone` folder that merges
-into an installed one. Run it by hand (*Actions > Run workflow*) to build for
-another Kdenlive version.
+the official build, and the settings page with MSYS2's Qt and KDE Frameworks.
+The page runs with Kdenlive's own copies of those libraries, which can be
+older, so the workflow checks that every function it uses is in them. It runs
+the tests inside that build with the emulated GPU, and uploads both libraries
+in a `kdenlive-<version>_standalone` folder that merges into an installed one,
+along with a screenshot of the settings page. Run it by hand (*Actions > Run
+workflow*) to build for another Kdenlive version.
 
 The CUDA kernels in `kernels/gpufx_kernels.cu` are shipped compiled to PTX in
 `kernels/gpufx_kernels.ptx`, so that no CUDA toolkit is needed. After changing
@@ -211,7 +248,13 @@ build.
 with the original CPU filter and once through the GPU path, and compares the
 pixels. The conversions are compared on video files the test writes
 (YUV4MPEG2, decoded by MLT's avformat producer). It also checks the number of transfers between memory and GPU, the
-fallbacks on errors, and the behaviour without a GPU.
+fallbacks on errors, the behaviour without a GPU, and the settings file.
+
+`tests/gpufx_settings_test` opens a settings dialog made like Kdenlive's,
+checks that the module loads the page and that the page adds itself, then
+applies changes and checks the settings file and the module. Run from the
+`bin` folder of Kdenlive's Windows build, it uses Kdenlive's Qt and KDE
+Frameworks; given a file name, it saves a screenshot of the page.
 
 By default the tests run against `mockcuda`, an emulated CUDA driver built
 with the tests: it executes the same kernel source compiled as C++ on the CPU,
@@ -241,6 +284,9 @@ of the time there). Every frame was identical to the CPU render.
 * `src/module.cpp` registers the module. It listens to MLT's
   `filter-create-done`, `transition-create-done` and `producer-create-done`
   factory events and wraps the filters, transitions and producers it knows.
+* `src/settings_file.cpp` reads the settings and loads the settings page,
+  `settings/settingspage.cpp`. `src/settings_page_api.h` is the interface
+  between them.
 * `src/bridge.cpp` replaces the wrapped filter's `process()`: the original
   function still runs and pushes the CPU `get_image` on the frame, and the
   bridge slides its own `get_image` on top of it. For each frame the bridge

@@ -18,8 +18,12 @@
  *
  * Runtime switches:
  *  - environment MLT_GPUFX=0: do not touch any filter
+ *  - the [gpufx] group of Kdenlive's settings file, saved by the settings page
+ *    (see settings_page_api.h): GPU processing off, or some services kept on
+ *    the CPU. Read when the module is loaded, and again in Kdenlive when the
+ *    settings are applied.
  *  - MLT global property "gpufx.enabled" (0/1): turns GPU processing off/on
- *    at runtime, overrides MLT_GPUFX
+ *    at runtime, overrides the settings file
  *  - MLT_GPUFX_DISABLE=dropshadow,box_blur: keep these effects on the CPU
  *    (avformat and avcolor_space stand for the two conversions)
  *  - MLT_GPUFX_DEBUG=1: log every frame processed on the GPU
@@ -31,10 +35,13 @@
  */
 
 #include "bridge.h"
+#include "gpu_runtime.h"
 #include "gpufx_log.h"
+#include "settings_file.h"
 
 #include <framework/mlt.h>
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -57,6 +64,9 @@ namespace {
 
 const char *const kGlobalEnabled = "gpufx.enabled";
 
+/** Whether the module listens to MLT's factory to wrap services */
+bool g_hooked = false;
+
 bool isFalse(const char *value)
 {
     return value && (!strcmp(value, "0") || !strcmp(value, "false") || !strcmp(value, "off") || !strcmp(value, "no"));
@@ -65,7 +75,6 @@ bool isFalse(const char *value)
 struct Settings
 {
     bool wrapFilters = true;
-    bool defaultEnabled = true;
     bool debug = false;
     std::vector<std::string> disabledEffects;
 };
@@ -76,7 +85,6 @@ const Settings &settings()
         Settings result;
         const char *env = getenv("MLT_GPUFX");
         result.wrapFilters = !isFalse(env);
-        result.defaultEnabled = result.wrapFilters;
         const char *debug = getenv("MLT_GPUFX_DEBUG");
         result.debug = debug && debug[0] && !isFalse(debug);
         if (const char *disabled = getenv("MLT_GPUFX_DISABLE")) {
@@ -147,7 +155,7 @@ std::string conversionList()
 {
     std::string list;
     for (const char *service : {"avformat", "avcolor_space"}) {
-        if (!serviceEnabled(service)) {
+        if (!serviceEnabled("conversion", service)) {
             continue;
         }
         if (!list.empty()) {
@@ -162,7 +170,7 @@ std::string transitionList()
 {
     std::string list;
     for (const TransitionDescriptor *transition : transitionRegistry()) {
-        if (!serviceEnabled(transition->service)) {
+        if (!serviceEnabled("transition", transition->service)) {
             continue;
         }
         if (!list.empty()) {
@@ -188,6 +196,59 @@ std::string effectList()
     return list;
 }
 
+/** Everything the module can run on the GPU, as <kind>:<service> */
+std::string serviceList()
+{
+    std::string list;
+    for (const EffectDescriptor *effect : effectRegistry()) {
+        list += std::string(list.empty() ? "" : ",") + "effect:" + effect->service;
+    }
+    for (const TransitionDescriptor *transition : transitionRegistry()) {
+        list += std::string(",transition:") + transition->service;
+    }
+    return list + ",conversion:avformat,conversion:avcolor_space";
+}
+
+/** One line of text for the description of the GPU */
+std::string oneLine(std::string text)
+{
+    std::replace(text.begin(), text.end(), '\n', ' ');
+    std::replace(text.begin(), text.end(), '\r', ' ');
+    return text;
+}
+
+void describeGpu(char *text, size_t size)
+{
+    if (!text || !size) {
+        return;
+    }
+    Runtime &runtime = Runtime::instance();
+    const bool available = runtime.ensureInitialized();
+    const DeviceInfo device = runtime.device();
+    char line[64];
+    std::string description = std::string("available=") + (available ? "1" : "0") + "\nstatus=" + oneLine(runtime.status()) + "\ndevice=" + oneLine(device.name);
+    snprintf(line, sizeof(line), "\ncompute_capability=%d.%d", device.computeMajor, device.computeMinor);
+    description += device.ordinal >= 0 ? line : "\ncompute_capability=";
+    snprintf(line, sizeof(line), "\ncuda_driver=%d.%d", device.driverVersion / 1000, (device.driverVersion % 1000) / 10);
+    description += device.driverVersion > 0 ? line : "\ncuda_driver=";
+    snprintf(line, sizeof(line), "\nmemory_mb=%d\n", int(device.totalMemory >> 20));
+    description += line;
+    snprintf(text, size, "%s", description.c_str());
+}
+
+void reloadSettings()
+{
+    reloadFileSettings();
+}
+
+/** What the module offers to its settings page */
+const gpufx_settings_host &settingsHost()
+{
+    static const std::string services = serviceList();
+    static const gpufx_settings_host host = {GPUFX_SETTINGS_API_VERSION, kSettingsGroup, services.c_str(), describeGpu, reloadSettings};
+    return host;
+}
+
 /** "gpufx" service: a filter that does nothing but report the GPU status.
  *  Creating it initializes CUDA unless the argument is "noinit". */
 void *statusServiceInit(mlt_profile, mlt_service_type, const char *, const void *arg)
@@ -205,7 +266,7 @@ void *statusServiceInit(mlt_profile, mlt_service_type, const char *, const void 
     mlt_properties_set(properties, "api", "CUDA");
     mlt_properties_set_int(properties, "available", available);
     mlt_properties_set_int(properties, "enabled", moduleEnabled());
-    mlt_properties_set_int(properties, "hooked", settings().wrapFilters);
+    mlt_properties_set_int(properties, "hooked", g_hooked);
     mlt_properties_set(properties, "status", runtime.status().c_str());
     mlt_properties_set(properties, "device", device.name.c_str());
     char text[64];
@@ -286,13 +347,19 @@ bool moduleEnabled()
             return !isFalse(value);
         }
     }
-    return settings().defaultEnabled;
+    return fileSettings().enabled;
 }
 
-bool serviceEnabled(const char *service)
+bool serviceEnabled(const char *kind, const char *service)
 {
     for (const std::string &name : settings().disabledEffects) {
         if (name == service) {
+            return false;
+        }
+    }
+    const size_t kindLength = strlen(kind);
+    for (const std::string &name : fileSettings().disabled) {
+        if (name.size() > kindLength && !name.compare(0, kindLength, kind) && name[kindLength] == ':' && name.compare(kindLength + 1, std::string::npos, service) == 0) {
             return false;
         }
     }
@@ -301,7 +368,7 @@ bool serviceEnabled(const char *service)
 
 bool effectEnabled(const EffectDescriptor &effect)
 {
-    return serviceEnabled(effect.service);
+    return serviceEnabled("effect", effect.service);
 }
 
 const std::vector<const EffectDescriptor *> &effectRegistry()
@@ -361,9 +428,32 @@ void mlt_register(mlt_repository repository)
         logInfo("disabled by MLT_GPUFX");
         return;
     }
+    reloadFileSettings();
+    const bool page = settingsPageWanted();
+    if (!fileSettings().enabled && !page) {
+        // Renders and other processes leave MLT alone. Kdenlive keeps the
+        // filters wrapped, so that the setting can be turned back on.
+        logInfo("turned off in the settings");
+        return;
+    }
     pinModule();
     mlt_events_listen(mlt_factory_event_object(), nullptr, "filter-create-done", onFilterCreated);
     mlt_events_listen(mlt_factory_event_object(), nullptr, "transition-create-done", onTransitionCreated);
     mlt_events_listen(mlt_factory_event_object(), nullptr, "producer-create-done", onProducerCreated);
+    g_hooked = true;
+    if (page) {
+        loadSettingsPage(settingsHost());
+    }
+}
+
+/** The interface the settings page gets, for the tests */
+#if defined(_WIN32)
+__declspec(dllexport)
+#else
+__attribute__((visibility("default")))
+#endif
+const gpufx_settings_host *gpufx_get_settings_host()
+{
+    return &gpufx::settingsHost();
 }
 }

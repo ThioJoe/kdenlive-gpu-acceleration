@@ -319,7 +319,7 @@ void *avcolourConverter()
  *  asked for, converted on the GPU. */
 bool deliversYuv422(mlt_frame frame, mlt_image_format requested, int width, int height)
 {
-    if (requested != mlt_image_yuv422 || width <= 0 || height <= 0 || (width & 1) || !serviceEnabled("avcolor_space")) {
+    if (requested != mlt_image_yuv422 || width <= 0 || height <= 0 || (width & 1) || !serviceEnabled("conversion", "avcolor_space")) {
         return false;
     }
     mlt_properties properties = MLT_FRAME_PROPERTIES(frame);
@@ -892,7 +892,7 @@ int bridgeTransitionGetImage(mlt_frame aFrame, uint8_t **image, mlt_image_format
     auto transition = static_cast<mlt_transition>(mlt_deque_peek(stack, count - 2));
     mlt_properties properties = MLT_TRANSITION_PROPERTIES(transition);
     auto *info = static_cast<TransitionWrapInfo *>(mlt_properties_get_data(properties, kWrapProperty, nullptr));
-    if (!info || !moduleEnabled() || !serviceEnabled(info->descriptor->service) || mlt_properties_get_int(properties, kForceCpu)) {
+    if (!info || !moduleEnabled() || !serviceEnabled("transition", info->descriptor->service) || mlt_properties_get_int(properties, kForceCpu)) {
         return cpuGetImage(aFrame, image, format, width, height, writable);
     }
     const TransitionDescriptor &descriptor = *info->descriptor;
@@ -991,7 +991,7 @@ void destroyProducerWrapInfo(void *data)
  *  be done on the GPU. */
 bool decodesOnGpu(mlt_producer producer)
 {
-    if (!moduleEnabled() || !serviceEnabled("avformat")) {
+    if (!moduleEnabled() || !serviceEnabled("conversion", "avformat")) {
         return false;
     }
     mlt_properties properties = MLT_PRODUCER_PROPERTIES(producer);

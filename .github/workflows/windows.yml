@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Kdenlive contributors
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Builds the GPU effects module (gpufx, see README.md) for Kdenlive's Windows
-# standalone build, tests it inside that build, and packages it laid out like
-# the standalone's folder: merging the package's kdenlive-<version>_standalone
-# folder into an installed one adds the module.
+# Builds the GPU effects module (gpufx, see README.md) and its settings page
+# for Kdenlive's Windows standalone build, tests them inside that build, and
+# packages them laid out like the standalone's folder: merging the package's
+# kdenlive-<version>_standalone folder into an installed one adds them.
 #
 # The workflow uses no action but actions/upload-artifact: the source is
 # fetched with git, and the compiler comes from the MSYS2 installation of
@@ -79,8 +79,13 @@ jobs:
           "KDENLIVE_ROOT=$root" >> $env:GITHUB_ENV
           Write-Output "Kdenlive's folder: $root"
 
-      - name: Install the compiler
-        run: pacman -Sy --noconfirm --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+      # Qt and KDE Frameworks for the settings page, which uses Kdenlive's own
+      # at runtime
+      - name: Install the compiler and libraries
+        run: |
+          pacman -Sy --noconfirm --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja \
+            mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-kconfigwidgets
+          pacman -Q mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-kconfig mingw-w64-ucrt-x86_64-kconfigwidgets
 
       - name: Build
         run: |
@@ -90,6 +95,7 @@ jobs:
           cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DMLT_INCLUDE_DIR="$(cygpath -m "$PWD/mlt/src")" -DMLT_LIBRARY="$root/bin/libmlt-7.dll"
           cmake --build build
+          test -f build/gpufx/gpufx-settings.dll || { echo "::error::The settings page was not built"; exit 1; }
 
       - name: Check the module's dependencies
         run: |
@@ -102,14 +108,54 @@ jobs:
             esac
           done
 
+      # The page is built with MSYS2's Qt and KDE Frameworks but runs with
+      # Kdenlive's, which can be older: every function it imports must be in
+      # Kdenlive's libraries.
+      - name: Check the settings page against Kdenlive's libraries
+        run: |
+          bin="$(cygpath -u "$KDENLIVE_ROOT")/bin"
+          for name in Qt6Core KF6ConfigCore; do
+            echo "$name: Kdenlive $(powershell -NoProfile -Command "(Get-Item '$(cygpath -w "$bin/$name.dll")').VersionInfo.ProductVersion"), built with $(powershell -NoProfile -Command "(Get-Item '$(cygpath -w "/ucrt64/bin/$name.dll")').VersionInfo.ProductVersion")"
+          done
+          check_imports() {
+            local file=$1 status=0
+            for dll in $(objdump -p "$file" | awk '/DLL Name:/ {print $3}'); do
+              case "${dll,,}" in
+                kernel32.dll|user32.dll|api-ms-win-crt-*.dll|libmlt-7.dll) continue ;;
+              esac
+              if [ ! -f "$bin/$dll" ]; then
+                echo "::error::$(basename "$file") needs $dll, which is not in Kdenlive's bin folder"
+                status=1
+                continue
+              fi
+              # Imported names of this DLL, and the names Kdenlive's copy exports
+              objdump -p "$file" | awk -v dll="$dll" '/DLL Name:/ {inside = ($3 == dll); next} inside && /^\t[0-9a-f]+\t/ {print $NF}' | sort -u > imports.txt
+              objdump -p "$bin/$dll" | awk '/^\t\[ *[0-9]+\] / {print $NF}' | sort -u > exports.txt
+              missing=$(comm -23 imports.txt exports.txt)
+              echo "$(basename "$file") -> $dll: $(wc -l < imports.txt) functions"
+              if [ -n "$missing" ]; then
+                echo "::error::Kdenlive's $dll lacks functions that $(basename "$file") uses"
+                echo "$missing" | c++filt
+                status=1
+              fi
+            done
+            return $status
+          }
+          check_imports build/gpufx/gpufx-settings.dll
+          check_imports build/tests/gpufx_settings_test.exe
+
       - name: Test inside Kdenlive's standalone build
         shell: bash
         run: |
           root=$(cygpath -u "$KDENLIVE_ROOT")
-          # Installed as in Kdenlive's folder: MLT loads it from lib/mlt
+          # Installed as in Kdenlive's folder: MLT loads the module from
+          # lib/mlt, the module loads the page from lib/mlt/gpufx
           cp build/libmltgpufx.dll "$root/lib/mlt/"
-          # From bin, MLT finds its modules, data and frei0r plugins as it does for Kdenlive
-          cp build/tests/gpufx_test.exe "$root/bin/"
+          mkdir -p "$root/lib/mlt/gpufx"
+          cp build/gpufx/gpufx-settings.dll "$root/lib/mlt/gpufx/"
+          # From bin, MLT finds its modules, data and frei0r plugins as it
+          # does for Kdenlive, and Qt finds Kdenlive's libraries and data
+          cp build/tests/gpufx_test.exe build/tests/gpufx_settings_test.exe "$root/bin/"
           export QT_QPA_PLATFORM=offscreen
           # The tests' emulated GPU, which runs the kernels on the CPU
           export GPUFX_CUDA_LIBRARY="$(cygpath -w "$PWD/build/tests/libgpufx_mockcuda.dll")"
@@ -119,6 +165,16 @@ jobs:
             exit 1
           fi
           MOCKCUDA_NO_DEVICE=1 "$root/bin/gpufx_test.exe" --no-gpu 2>&1 | tail -n 3
+          "$root/bin/gpufx_test.exe" --settings-off 2>&1 | tail -n 3
+          # The settings page with Kdenlive's Qt and KDE Frameworks, offscreen
+          # if Kdenlive has Qt's plugin for it
+          find "$root" -ipath '*platforms*' -iname 'q*.dll'
+          platform=windows
+          if find "$root" -iname qoffscreen.dll | grep -q .; then
+            platform=offscreen
+          fi
+          mkdir -p screenshot
+          QT_QPA_PLATFORM=$platform "$root/bin/gpufx_settings_test.exe" "$(cygpath -w "$PWD/screenshot/settings-page.png")" 2>&1 | tee settings-test.log
 
       - name: Package
         env:
@@ -133,14 +189,17 @@ jobs:
           by ${RUN_URL}
 
           To install, drag the $folder folder into the folder that contains your
-          Kdenlive folder and let Windows merge them. It adds one file,
-          $folder\\lib\\mlt\\libmltgpufx.dll, which Kdenlive and its renderer load on
-          their own. To uninstall, delete that file.
+          Kdenlive folder and let Windows merge them. It adds two files:
+          $folder\\lib\\mlt\\libmltgpufx.dll, the GPU effects, which Kdenlive and its
+          renderer load on their own, and
+          $folder\\lib\\mlt\\gpufx\\gpufx-settings.dll, which adds a GPU Acceleration
+          page to Kdenlive's settings (Settings > Configure Kdenlive).
+          To uninstall, delete libmltgpufx.dll and the gpufx folder.
 
           It needs an NVIDIA GPU of the Maxwell generation or newer (GeForce GTX 750
           and later) and its driver. Without them, every effect runs on the CPU as
-          before. To turn it off without uninstalling, set the environment variable
-          MLT_GPUFX=0.
+          before. GPU processing can be turned off on the settings page, or with the
+          environment variable MLT_GPUFX=0.
 
           See ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY} for the effects it accelerates.
           EOF
@@ -155,6 +214,13 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+      - name: Upload a screenshot of the settings page
+        uses: actions/upload-artifact@v4
+        with:
+          name: settings-page-screenshot
+          path: screenshot/
+          if-no-files-found: error
+
       - name: Summary
         shell: bash
         run: |
@@ -163,11 +229,12 @@ jobs:
             echo
             echo "Download **gpufx-kdenlive-${KDENLIVE_VERSION}-windows** under Artifacts below and unzip it."
             echo "Drag its \`kdenlive-${KDENLIVE_VERSION}_standalone\` folder into the folder that contains your Kdenlive folder and let Windows merge them:"
-            echo "it adds \`lib\\mlt\\libmltgpufx.dll\`."
+            echo "it adds \`lib\\mlt\\libmltgpufx.dll\` and \`lib\\mlt\\gpufx\\gpufx-settings.dll\`."
             echo
             echo "Tests run inside Kdenlive ${KDENLIVE_VERSION}'s own build, with an emulated GPU:"
             echo
             echo '```'
             tail -n 1 test.log
+            tail -n 1 settings-test.log
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

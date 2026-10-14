@@ -137,6 +137,7 @@ add_library(mltgpufx MODULE
     src/module.cpp
     src/qt_draw.cpp
     src/qt_raster.cpp
+    src/settings_file.cpp
     src/sws_port.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/gpufx_ptx.cpp"
 )
@@ -180,6 +181,19 @@ endif()
 install(TARGETS mltgpufx
     LIBRARY DESTINATION "${gpufx_install_dir}"
     RUNTIME DESTINATION "${gpufx_install_dir}")
+
+option(GPUFX_SETTINGS_PAGE "Build the module's page in Kdenlive's settings dialog (needs Qt 6 and KDE Frameworks 6)" ON)
+if(GPUFX_SETTINGS_PAGE)
+    find_package(Qt6 QUIET COMPONENTS Core Gui Widgets)
+    find_package(KF6Config QUIET)
+    find_package(KF6ConfigWidgets QUIET)
+    if(Qt6Widgets_FOUND AND KF6Config_FOUND AND KF6ConfigWidgets_FOUND)
+        add_subdirectory(settings)
+    else()
+        message(WARNING "Qt 6 or KDE Frameworks 6 (KConfig, KConfigWidgets) not found: the settings page is not built. "
+                        "Set GPUFX_SETTINGS_PAGE to OFF to build the module alone.")
+    endif()
+endif()
 
 if(BUILD_TESTING)
     add_subdirectory(tests)
