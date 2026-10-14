@@ -126,12 +126,14 @@ jobs:
                 status=1
                 continue
               fi
-              # Imported names of this DLL (lines of address, hint and name
-              # after its "DLL Name"), and the names Kdenlive's copy exports
+              # Imported names of this DLL (the lines after its "DLL Name"
+              # that start with an address and end with the name; versions of
+              # objdump differ in the columns between), and the names
+              # Kdenlive's copy exports
               objdump -p "$file" | tr -d '\r' | awk -v dll="$dll" '
                 /DLL Name:/ {inside = ($3 == dll); next}
                 /^[ \t]*$/ {inside = 0}
-                inside && NF >= 3 && $1 ~ /^[0-9a-fA-F]+$/ && $2 ~ /^[0-9]+$/ {print $NF}' | sort -u > imports.txt
+                inside && NF >= 3 && $1 ~ /^[0-9a-fA-F]+$/ {print $NF}' | sort -u > imports.txt
               objdump -p "$bin/$dll" | tr -d '\r' | awk '/^[ \t]*\[ *[0-9]+\]/ {print $NF}' | sort -u > exports.txt
               missing=$(comm -23 imports.txt exports.txt)
               echo "$(basename "$file") -> $dll: $(wc -l < imports.txt) functions"
