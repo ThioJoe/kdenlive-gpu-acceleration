@@ -308,6 +308,20 @@ QString selftestWindows()
     return text;
 }
 
+/** An action of the application. KXmlGui's actions belong to their action
+ *  collection, not to the window: they are found in the menus they are in. */
+QAction *selftestAction(const QString &name)
+{
+    for (QWidget *widget : QApplication::allWidgets()) {
+        for (QAction *action : widget->actions()) {
+            if (action->objectName() == name) {
+                return action;
+            }
+        }
+    }
+    return nullptr;
+}
+
 void selftestStart()
 {
     auto *timer = new QTimer(QCoreApplication::instance());
@@ -315,9 +329,10 @@ void selftestStart()
     clock->start();
     QObject::connect(timer, &QTimer::timeout, timer, [timer, clock]() {
         for (QWidget *widget : QApplication::topLevelWidgets()) {
-            auto *window = qobject_cast<QMainWindow *>(widget);
-            QAction *action = window && window->isVisible() ? window->findChild<QAction *>(QStringLiteral("options_configure")) : nullptr;
-            if (action) {
+            if (!qobject_cast<QMainWindow *>(widget) || !widget->isVisible()) {
+                continue;
+            }
+            if (QAction *action = selftestAction(QStringLiteral("options_configure"))) {
                 timer->stop();
                 action->trigger();
                 return;
