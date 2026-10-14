@@ -49,6 +49,7 @@
 #include <QElapsedTimer>
 #include <QMainWindow>
 #include <QTimer>
+#include <QWindow>
 
 #include <cstdlib>
 #endif
@@ -277,6 +278,36 @@ void selftestFinish(const QString &report, int code)
     std::_Exit(code);
 }
 
+/** The application's windows, for a report when the settings dialog does
+ *  not open */
+QString selftestWindows()
+{
+    QString text;
+    for (QWidget *widget : QApplication::topLevelWidgets()) {
+        if (!widget->isVisible() && !qobject_cast<QMainWindow *>(widget)) {
+            continue;
+        }
+        text += QStringLiteral("%1 \"%2\" \"%3\"%4\n")
+                    .arg(QLatin1String(widget->metaObject()->className()), widget->objectName(), widget->windowTitle(),
+                         widget->isVisible() ? QString() : QStringLiteral(" (hidden)"));
+        for (QLabel *label : widget->findChildren<QLabel *>()) {
+            if (label->isVisible() && !label->text().isEmpty()) {
+                text += QStringLiteral("  %1\n").arg(label->text().left(300));
+            }
+        }
+    }
+    if (QWidget *modal = QApplication::activeModalWidget()) {
+        text += QStringLiteral("modal: %1 \"%2\"\n").arg(QLatin1String(modal->metaObject()->className()), modal->windowTitle());
+    }
+    // Qt Quick windows, like Kdenlive's splash screen
+    for (QWindow *window : QGuiApplication::topLevelWindows()) {
+        if (window->isVisible()) {
+            text += QStringLiteral("window: %1 \"%2\"\n").arg(QLatin1String(window->metaObject()->className()), window->title());
+        }
+    }
+    return text;
+}
+
 void selftestStart()
 {
     auto *timer = new QTimer(QCoreApplication::instance());
@@ -293,7 +324,7 @@ void selftestStart()
             }
         }
         if (clock->elapsed() > 150000) {
-            selftestFinish(QStringLiteral("Kdenlive's main window did not appear\n"), 2);
+            selftestFinish(QStringLiteral("Kdenlive's main window did not appear. Windows:\n") + selftestWindows(), 2);
         }
     });
     timer->start(500);

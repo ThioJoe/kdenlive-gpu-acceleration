@@ -248,10 +248,6 @@ jobs:
 
           [env]
           kdenliverendererpath=$bin/kdenlive_render.exe
-          meltpath=$bin/melt.exe
-          ffmpegpath=$bin/ffmpeg.exe
-          ffplaypath=$bin/ffplay.exe
-          ffprobepath=$bin/ffprobe.exe
 
           [startup]
           showWelcome=false
