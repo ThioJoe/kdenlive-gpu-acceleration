@@ -1,0 +1,173 @@
+# SPDX-FileCopyrightText: 2026 Kdenlive contributors
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Builds the GPU effects module (gpufx, see README.md) for Kdenlive's Windows
+# standalone build, tests it inside that build, and packages it laid out like
+# the standalone's folder: merging the package's kdenlive-<version>_standalone
+# folder into an installed one adds the module.
+#
+# The workflow uses no action but actions/upload-artifact: the source is
+# fetched with git, and the compiler comes from the MSYS2 installation of
+# GitHub's Windows runners.
+
+name: Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      kdenlive_version:
+        description: Kdenlive release whose Windows standalone build the module is tested with and laid out for
+        required: true
+        default: '26.08.1'
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  KDENLIVE_VERSION: ${{ inputs.kdenlive_version || '26.08.1' }}
+  # MLT headers to compile with. The module adapts to the version of the MLT
+  # it is loaded into at runtime.
+  MLT_HEADERS: v7.42.0
+
+jobs:
+  windows:
+    name: Build and test with Kdenlive ${{ inputs.kdenlive_version || '26.08.1' }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # For the steps in MSYS2's shell: its UCRT64 environment, in the
+      # workspace. Kdenlive's Windows builds use MinGW with the UCRT C
+      # runtime: so does this toolchain, the module and MLT share memory.
+      MSYSTEM: UCRT64
+      CHERE_INVOKING: '1'
+    defaults:
+      run:
+        shell: C:\msys64\usr\bin\bash.exe --login -eo pipefail {0}
+    steps:
+      - name: Get the source and MLT's headers
+        shell: bash
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          git init -q source
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          git -C source -c http.extraheader="$auth" fetch -q --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_SHA"
+          git -C source checkout -q FETCH_HEAD
+          git clone -q --depth 1 --branch "$MLT_HEADERS" https://github.com/mltframework/mlt.git mlt
+
+      - name: Get Kdenlive's standalone build
+        shell: pwsh
+        run: |
+          $version = $env:KDENLIVE_VERSION
+          $series = $version -replace '\.[^.]+$', ''
+          $name = "kdenlive-${version}_standalone.exe"
+          # Older releases move to the Attic
+          foreach ($base in "https://download.kde.org/stable/kdenlive/$series/windows", "https://download.kde.org/Attic/kdenlive/$series/windows") {
+            Write-Output "Downloading $base/$name"
+            curl.exe --fail --location --retry 3 --connect-timeout 30 --silent --show-error --output $name "$base/$name"
+            if ($LASTEXITCODE -eq 0) { break }
+            Remove-Item $name -ErrorAction SilentlyContinue
+          }
+          if (-not (Test-Path $name)) { throw "Cannot download $name from download.kde.org" }
+          7z x $name -okdenlive -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Cannot extract $name" }
+          $mlt = Get-ChildItem kdenlive -Recurse -Filter libmlt-7.dll | Select-Object -First 1
+          if (-not $mlt) { throw "$name has no libmlt-7.dll" }
+          $root = Split-Path (Split-Path $mlt.FullName)
+          "KDENLIVE_ROOT=$root" >> $env:GITHUB_ENV
+          Write-Output "Kdenlive's folder: $root"
+
+      - name: Install the compiler
+        run: pacman -Sy --noconfirm --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+
+      - name: Build
+        run: |
+          root=$(cygpath -m "$KDENLIVE_ROOT")
+          # Linked to Kdenlive's own libmlt-7.dll, so that a function it does
+          # not have fails the build
+          cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DMLT_INCLUDE_DIR="$(cygpath -m "$PWD/mlt/src")" -DMLT_LIBRARY="$root/bin/libmlt-7.dll"
+          cmake --build build
+
+      - name: Check the module's dependencies
+        run: |
+          deps=$(objdump -p build/libmltgpufx.dll | awk '/DLL Name:/ {print $3}')
+          echo "$deps"
+          for dll in $deps; do
+            case "${dll,,}" in
+              kernel32.dll|api-ms-win-crt-*.dll|libmlt-7.dll) ;;
+              *) echo "::error::libmltgpufx.dll needs $dll, which is not part of Windows or MLT"; exit 1 ;;
+            esac
+          done
+
+      - name: Test inside Kdenlive's standalone build
+        shell: bash
+        run: |
+          root=$(cygpath -u "$KDENLIVE_ROOT")
+          # Installed as in Kdenlive's folder: MLT loads it from lib/mlt
+          cp build/libmltgpufx.dll "$root/lib/mlt/"
+          # From bin, MLT finds its modules, data and frei0r plugins as it does for Kdenlive
+          cp build/tests/gpufx_test.exe "$root/bin/"
+          export QT_QPA_PLATFORM=offscreen
+          # The tests' emulated GPU, which runs the kernels on the CPU
+          export GPUFX_CUDA_LIBRARY="$(cygpath -w "$PWD/build/tests/libgpufx_mockcuda.dll")"
+          "$root/bin/gpufx_test.exe" 2>&1 | tee test.log
+          if grep '^SKIP' test.log; then
+            echo "::error::Kdenlive's MLT lacks services that the tests need"
+            exit 1
+          fi
+          MOCKCUDA_NO_DEVICE=1 "$root/bin/gpufx_test.exe" --no-gpu 2>&1 | tail -n 3
+
+      - name: Package
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          folder="kdenlive-${KDENLIVE_VERSION}_standalone"
+          cmake --install build --prefix "dist/$folder"
+          cat > dist/README-gpufx.txt <<EOF
+          GPU effects (gpufx) for Kdenlive ${KDENLIVE_VERSION} on Windows
+
+          Built from ${GITHUB_REPOSITORY} commit ${GITHUB_SHA}
+          by ${RUN_URL}
+
+          To install, drag the $folder folder into the folder that contains your
+          Kdenlive folder and let Windows merge them. It adds one file,
+          $folder\\lib\\mlt\\libmltgpufx.dll, which Kdenlive and its renderer load on
+          their own. To uninstall, delete that file.
+
+          It needs an NVIDIA GPU of the Maxwell generation or newer (GeForce GTX 750
+          and later) and its driver. Without them, every effect runs on the CPU as
+          before. To turn it off without uninstalling, set the environment variable
+          MLT_GPUFX=0.
+
+          See ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY} for the effects it accelerates.
+          EOF
+          find dist -type f
+
+      # Downloaded as a zip of the dist folder: the README and the
+      # kdenlive-<version>_standalone folder
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpufx-kdenlive-${{ env.KDENLIVE_VERSION }}-windows
+          path: dist/
+          if-no-files-found: error
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "### GPU effects module for Kdenlive ${KDENLIVE_VERSION} on Windows"
+            echo
+            echo "Download **gpufx-kdenlive-${KDENLIVE_VERSION}-windows** under Artifacts below and unzip it."
+            echo "Drag its \`kdenlive-${KDENLIVE_VERSION}_standalone\` folder into the folder that contains your Kdenlive folder and let Windows merge them:"
+            echo "it adds \`lib\\mlt\\libmltgpufx.dll\`."
+            echo
+            echo "Tests run inside Kdenlive ${KDENLIVE_VERSION}'s own build, with an emulated GPU:"
+            echo
+            echo '```'
+            tail -n 1 test.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

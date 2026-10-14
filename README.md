@@ -1,0 +1,271 @@
+<!--
+    SPDX-FileCopyrightText: 2026 Kdenlive contributors
+    SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+-->
+
+# GPU acceleration for Kdenlive
+
+`gpufx` is an MLT module that runs some existing MLT filters on NVIDIA GPUs
+with CUDA. It does not add new effects: projects keep using the regular
+effects and parameters, and render the same with or without the module, with
+or without an NVIDIA GPU.
+
+Kdenlive itself is not modified. The module is one library that goes into
+MLT's module folder of an installed Kdenlive (`lib\mlt` on Windows), and it
+is used by every process that loads MLT from there: Kdenlive itself (monitors,
+timeline preview) and the render processes.
+
+## Installing on Windows
+
+The [Windows workflow](.github/workflows/windows.yml) builds the module for
+Kdenlive's Windows standalone build and uploads it as an artifact, laid out
+like Kdenlive's folder. Open the latest run under *Actions*, download
+`gpufx-kdenlive-<version>-windows` and unzip it, then drag its
+`kdenlive-<version>_standalone` folder into the folder that contains your
+Kdenlive folder and let Windows merge them. It adds
+`lib\mlt\libmltgpufx.dll`. To uninstall, delete that file.
+
+## Accelerated effects
+
+| Kdenlive effect                     | MLT service          | Notes |
+|-------------------------------------|----------------------|-------|
+| Drop Shadow                         | `dropshadow`         | Matches the CPU filter (Qt's `QGraphicsDropShadowEffect`): same alpha, colors within one level, 8-bit only |
+| BoxBlur                             | `box_blur`           | Identical output, 8-bit only |
+| Box Blur                            | `boxblur`            | Identical output |
+| Intensity (Brightness), Fade in/out | `brightness`         | Lightweight, see below |
+| Lift/gamma/gain                     | `lift_gamma_gain`    | Lightweight, see below |
+| Square Blur                         | `frei0r.squareblur`  | Identical output |
+| Glow                                | `frei0r.glow`        | Identical output |
+| Soft Glow                           | `frei0r.softglow`    | Identical output |
+| Sharpen                             | `frei0r.sharpness`   | Identical output |
+| Transform                           | `qtblend`            | Matches the CPU filter (QPainter): same alpha, colors within one level. Alpha blend compositing and 8-bit only, see below |
+| Track compositing                   | `qtblend` transition | Matches the CPU transition: same alpha, colors within one level, see below |
+| Video decoding to RGBA              | `avformat` producer  | Identical output, 8-bit 4:2:0 video, see below |
+| Output conversion to YUV            | `avcolor_space`      | Identical output, see below |
+
+Any mix of accelerated and CPU-only effects works: each accelerated effect is
+moved to the GPU for its own processing, and the others stay on the CPU.
+
+When several accelerated effects follow each other in an effect stack, the
+frame stays on the GPU between them: it is uploaded once before the first one
+and downloaded once after the last one.
+
+*Lightweight* effects are cheap on the CPU, so on their own copying the frame
+to the GPU and back would cost more than it saves. They only run on the GPU
+when the frame is there anyway for a neighbouring accelerated effect (for
+example a fade applied next to a drop shadow).
+
+Frames in other formats than 8-bit RGBA (for example 16-bit `rgba64`
+processing), unusual parameter values, and any CUDA error fall back to the
+original CPU filter for that frame. frei0r effects always work in 8-bit RGBA;
+they stay on the CPU when their MLT `threads` property splits the frame in
+slices. An error that leaves the GPU in an unknown state turns GPU processing
+off for the rest of the session.
+
+### Transform
+
+The Transform effect (MLT's `qtblend`) draws the clip with QPainter. The GPU
+version reproduces Qt's raster engine: the transform with its rounding, the
+antialiased edges (Qt's rasterizer is ported in `src/qt_raster.cpp`), the
+16-bit bilinear sampling and blending, and the conversions back to 8 bits.
+The only difference left comes from the approximate reciprocal that Qt uses
+to un-premultiply colors (an SSE instruction whose exact results vary between
+processors): some colors can differ by one level.
+
+These cases stay on the CPU: composition modes other than *Alpha blend*,
+rotation combined with *Distort*, and with MLT 7.38, scaling a clip down
+(that version scales with `QImage::scaled()`). The geometry follows MLT 7.38
+to 7.44; with a newer MLT the effect stays on the CPU until the module is
+updated, unless `MLT_GPUFX_QTBLEND=force` is set.
+
+### Track compositing
+
+Kdenlive composites every video track onto the tracks below with MLT's
+`qtblend` transition, which draws with QPainter like the Transform effect and
+is reproduced the same way. The GPU version follows MLT's shortcuts too: a
+top track without transparency replaces the tracks below without blending
+(the opacity check runs on the GPU when the image is there).
+
+Copying both images to the GPU and the result back costs about as much as
+compositing them on the CPU, so a transition only runs on the GPU when one of
+its images is already there (a clip with accelerated effects, or the result
+of the transition below), or when the GPU can also convert the result to the
+format the caller asks for (see below). With two composited tracks or more,
+the whole stack is drawn on the GPU: every clip image is uploaded once and
+the final frame is downloaded once. This includes Kdenlive's tracks, each of
+which MLT wraps in a tractor of its own: the result of a clip's accelerated
+effects is passed through the track's tractor on the GPU.
+
+The same cases as for Transform stay on the CPU (blend modes, 10-bit,
+rotation with *Distort*, scaling down with MLT 7.38). MLT 7.41 only exists as
+development versions (Kdenlive 26.08 ships one), which do not all size the
+images the same way: when that makes a difference, the CPU composites.
+
+### Image conversions
+
+Effects and compositing work on RGBA images, while video is decoded as YUV
+and encoded as YUV. MLT converts between them on the CPU with libswscale,
+which takes more time than most effects: measured on one core of an x86-64
+server processor, about 30 ms for a 1080p frame from YUV to RGBA, and 10 ms
+back to YUV.
+
+* **Video decoding to RGBA**: MLT's avformat producer converts every decoded
+  frame to the format asked for. gpufx wraps the avformat producers: when
+  RGBA is asked for and the video is 8-bit 4:2:0 YUV (`yuv420p`,
+  `yuvj420p`, `yuva420p`, the format of nearly all H.264, HEVC and VP9
+  video), it takes the frame as decoded, uploads it (1.5 bytes per pixel
+  instead of 4) and converts it on the GPU. When the next stage is an
+  accelerated effect, the RGBA image stays on the GPU. Other formats, odd
+  sizes, interlaced frames whose height is not a multiple of 4, and hardware
+  decoding (`hwaccel`) keep the CPU conversion.
+* **Output conversion to YUV**: MLT's avformat consumer (rendering to
+  `yuv420p` codecs) and Kdenlive's monitor ask for packed YUV 4:2:2. When the
+  final effect or compositing ran on the GPU and MLT would convert with its
+  `avcolor_space` filter, the GPU converts the result and only the YUV image
+  (and its alpha channel) is downloaded. This also lets compositing and
+  lightweight effects run on the GPU when nothing else of the frame is there.
+
+Both conversions reproduce libswscale with the flags MLT uses: the
+coefficients, chroma sampling positions and rounding are ported in
+`src/sws_port.cpp`, and the output is identical for every colorspace MLT
+handles (BT.601, BT.709, BT.2020, SMPTE 240M), limited and full range video,
+and MLT's field by field conversion of interlaced video. This was checked
+against libswscale of FFmpeg 6.1, 7.1 and 8.0, with and without its SIMD
+code. One exception: FFmpeg 8.0 rounds the conversion to full range YUV
+differently from older versions, so a full range output (a consumer with
+`color_range=full`, not Kdenlive's default) keeps the CPU conversion.
+
+## Requirements
+
+* An NVIDIA GPU of the Maxwell generation or newer (compute capability 5.0)
+* The NVIDIA driver. Nothing else: the CUDA toolkit is not needed to build or
+  to run the module. The driver compiles the kernels for the installed GPU
+  the first time they are used and caches the result.
+
+Without an NVIDIA driver the module does nothing and every effect runs on the
+CPU as usual.
+
+## Settings
+
+The module is controlled with environment variables, which the processes
+Kdenlive starts (renders, timeline preview) inherit:
+
+| Variable                  | Effect |
+|---------------------------|--------|
+| `MLT_GPUFX=0`             | Do not touch any filter |
+| `MLT_GPUFX_DISABLE`       | Comma separated MLT services to keep on the CPU, e.g. `dropshadow,box_blur`. `avformat` and `avcolor_space` stand for the two image conversions |
+| `MLT_GPUFX_DEBUG=1`       | Log every frame processed on the GPU (MLT info log level) |
+| `MLT_GPUFX_QTBLEND=force` | Accelerate Transform with MLT versions newer than the module knows |
+| `GPUFX_CUDA_DEVICE=n`     | Use the n-th CUDA device (default 0) |
+| `GPUFX_POOL_MB=n`         | Size of the GPU memory kept for reuse (default: 1/8 of the GPU memory, at most 1 GiB) |
+
+Applications linking MLT can also set the MLT global property
+`gpufx.enabled` to `0` or `1` at any time. Creating the `gpufx` filter
+service returns a filter whose properties describe the state of the module
+(`available`, `status`, `device`, `effects`, `gpu_frames`, ...).
+
+## Building
+
+The module only depends on MLT:
+
+```
+cmake -S . -B build
+cmake --build build
+cmake --install build --prefix <Kdenlive's folder>
+```
+
+It finds MLT through its CMake package. For an MLT without development files,
+such as the one in Kdenlive's Windows standalone build, pass MLT's headers and
+library: `-DMLT_INCLUDE_DIR=<MLT source>/src -DMLT_LIBRARY=<Kdenlive>/bin/libmlt-7.dll`.
+
+The module is installed in MLT's module directory: `lib/mlt` on Windows,
+elsewhere the one of the `mlt-framework-7` pkg-config file when it is inside
+the install prefix, otherwise `<prefix>/<libdir>/mlt-7`, which MLT does not
+look into. Set `GPUFX_MLT_MODULE_DIR` to choose the location.
+
+On Windows the module must use the same C runtime as MLT, as they free each
+other's memory: Kdenlive's builds use UCRT, so a MinGW toolchain targeting
+UCRT (not the older `msvcrt.dll`), such as MSYS2's UCRT64 environment.
+
+The Windows workflow does this for Kdenlive's Windows standalone build: it
+compiles the module with MSYS2's UCRT toolchain against the `libmlt-7.dll` of
+the official build, runs the tests inside that build with the emulated GPU,
+and uploads the module in a `kdenlive-<version>_standalone` folder that merges
+into an installed one. Run it by hand (*Actions > Run workflow*) to build for
+another Kdenlive version.
+
+The CUDA kernels in `kernels/gpufx_kernels.cu` are shipped compiled to PTX in
+`kernels/gpufx_kernels.ptx`, so that no CUDA toolkit is needed. After changing
+the kernels, regenerate the PTX with nvcc:
+
+```
+cmake --build <builddir> --target gpufx_update_ptx
+```
+
+or configure with `-DGPUFX_BUILD_PTX=ON` to compile the kernels during the
+build.
+
+## Tests
+
+`tests/gpufx_test` renders every accelerated effect, alone and in chains, once
+with the original CPU filter and once through the GPU path, and compares the
+pixels. The conversions are compared on video files the test writes
+(YUV4MPEG2, decoded by MLT's avformat producer). It also checks the number of transfers between memory and GPU, the
+fallbacks on errors, and the behaviour without a GPU.
+
+By default the tests run against `mockcuda`, an emulated CUDA driver built
+with the tests: it executes the same kernel source compiled as C++ on the CPU,
+so the tests run on machines without an NVIDIA GPU. To run the same
+comparisons on a real GPU, point the tests at the driver:
+
+```
+GPUFX_CUDA_LIBRARY=libcuda.so.1 ./gpufx_test      # Linux
+set GPUFX_CUDA_LIBRARY=nvcuda.dll & gpufx_test.exe  # Windows
+```
+
+On Windows, MLT looks for its modules next to the executable that uses it:
+set `MLT_REPOSITORY` to MLT's module folder (for Kdenlive's standalone build,
+`lib\mlt`), the tests pass it on to MLT.
+
+## Performance
+
+On an NVIDIA RTX 5090 with Kdenlive 26.08.1 for Windows (MLT 7.41, Qt 6.11,
+FFmpeg 8), rendering 4K 60 fps projects made of Lottie animations with
+Transform effects over an image background: H.264 4:2:0 renders ran 1.5 to
+2.2 times as fast, and renders to lossless RGB took about as long with 20 to
+30% less CPU time (the drawing of the animations and the encoding take most
+of the time there). Every frame was identical to the CPU render.
+
+## How it works
+
+* `src/module.cpp` registers the module. It listens to MLT's
+  `filter-create-done`, `transition-create-done` and `producer-create-done`
+  factory events and wraps the filters, transitions and producers it knows.
+* `src/bridge.cpp` replaces the wrapped filter's `process()`: the original
+  function still runs and pushes the CPU `get_image` on the frame, and the
+  bridge slides its own `get_image` on top of it. For each frame the bridge
+  reads the effect parameters, then either calls the CPU `get_image`
+  unchanged or fetches the input image, runs the effect on the GPU and
+  returns the result. Between two accelerated effects the image is passed on
+  the GPU through frame properties instead of being downloaded.
+* `src/gpu_runtime.cpp` loads the CUDA driver at runtime, creates the
+  context, loads the PTX and keeps pools of GPU memory and streams.
+* `src/effect_*.cpp` read the parameters of each effect, exactly like the CPU
+  filter does, and launch the kernels. `src/qt_raster.cpp` holds the parts of
+  Qt's paint engine needed to draw like QPainter.
+* `src/convert.cpp` runs the image conversions, with the libswscale setup
+  ported in `src/sws_port.cpp`.
+* `kernels/gpufx_kernels.cu` contains the kernels. They reproduce the integer
+  arithmetic of the CPU code (for the drop shadow, Qt's blur, scaling and
+  compositing), which is why the output matches.
+
+## Adding an effect
+
+1. Write the kernels in `kernels/gpufx_kernels.cu` (no shared memory, no
+   `pow`/`exp`: precompute on the host) and list them in
+   `kernels/gpufx_kernel_list.h`. Regenerate the PTX.
+2. Add an `EffectDescriptor` in a `src/effect_*.cpp` file: its `plan()`
+   function reads the parameters for the frame the same way the CPU filter
+   does and returns a job, or `Decision::Cpu` for anything it does not
+   handle identically. Register it in `effectRegistry()` in `src/module.cpp`.
+3. Add comparisons with the CPU filter to `tests/test_gpufx.cpp`.
