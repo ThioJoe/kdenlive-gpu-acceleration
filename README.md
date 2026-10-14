@@ -18,9 +18,9 @@ Kdenlive's settings dialog for it (see [Settings](#settings)).
 
 ## Installing on Windows
 
-The [Windows workflow](.github/workflows/windows.yml) builds the module for
-Kdenlive's Windows standalone build and uploads it as an artifact, laid out
-like Kdenlive's folder. Open the latest run under *Actions*, download
+The [Windows workflow](.github/workflows/windows.yml) builds the module and
+its settings page for Kdenlive's Windows standalone build and uploads them as
+an artifact, laid out like Kdenlive's folder. Open the latest run under *Actions*, download
 `gpufx-kdenlive-<version>-windows` and unzip it, then drag its
 `kdenlive-<version>_standalone` folder into the folder that contains your
 Kdenlive folder and let Windows merge them. It adds

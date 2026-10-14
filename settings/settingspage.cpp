@@ -29,6 +29,7 @@
 #include <QDirIterator>
 #include <QEvent>
 #include <QFile>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHash>
 #include <QIcon>
@@ -347,10 +348,16 @@ void addPage(KConfigDialog *dialog)
     status->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(status);
 
+    // The effects in two columns, read down
     auto *effects = new QGroupBox(QStringLiteral("Effects"), page);
-    auto *effectsLayout = new QVBoxLayout(effects);
+    auto *effectsLayout = new QGridLayout(effects);
+    const int effectCount = int(std::count_if(services().begin(), services().end(), [](const Service &service) {
+        return service.kind == QLatin1String("effect");
+    }));
+    const int rows = (effectCount + 1) / 2;
     auto *others = new QGroupBox(QStringLiteral("Compositing and conversions"), page);
     auto *othersLayout = new QVBoxLayout(others);
+    int effectIndex = 0;
     for (size_t i = 0; i < services().size(); ++i) {
         const Service &service = services()[i];
         const bool effect = service.kind == QLatin1String("effect");
@@ -358,7 +365,12 @@ void addPage(KConfigDialog *dialog)
         box->setObjectName(QStringLiteral("kcfg_") + service.key);
         box->setToolTip(QStringLiteral("MLT %1: %2").arg(service.kind == QLatin1String("conversion") ? QStringLiteral("service") : service.kind, service.service));
         box->setChecked(settings->value(i));
-        (effect ? effectsLayout : othersLayout)->addWidget(box);
+        if (effect) {
+            effectsLayout->addWidget(box, effectIndex % rows, effectIndex / rows);
+            ++effectIndex;
+        } else {
+            othersLayout->addWidget(box);
+        }
     }
     layout->addWidget(effects);
     layout->addWidget(others);
