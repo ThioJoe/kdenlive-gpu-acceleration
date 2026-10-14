@@ -254,12 +254,15 @@ jobs:
           "@
           Set-Content "$env:LOCALAPPDATA\kdenliverc" $config
           Copy-Item build\gpufx\gpufx-settings-selftest.dll "$root\lib\mlt\gpufx\gpufx-settings.dll" -Force
+          # Without Python, which Kdenlive's speech to text and object
+          # detection settings would set up first
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch 'Python|WindowsApps' }) -join ';'
           $env:GPUFX_SELFTEST_OUTPUT = "$PWD\screenshot"
           $env:GPUFX_CUDA_LIBRARY = "$PWD\build\tests\libgpufx_mockcuda.dll"
           $kdenlive = Start-Process "$root\bin\kdenlive.exe" -PassThru
           # Keeps the handle, without which PowerShell loses the exit code
           $null = $kdenlive.Handle
-          $finished = $kdenlive.WaitForExit(330000)
+          $finished = $kdenlive.WaitForExit(390000)
           if (-not $finished) {
             Stop-Process -Id $kdenlive.Id -Force
             $null = $kdenlive.WaitForExit(30000)

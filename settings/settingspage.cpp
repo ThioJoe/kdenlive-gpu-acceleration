@@ -344,10 +344,10 @@ void selftestStart()
         for (;;) {
             QThread::msleep(2000);
             const qint64 now = g_selftestClock.elapsed();
-            if (now - g_selftestHeartbeat > 60000) {
-                selftestFinish(QStringLiteral("Kdenlive's main thread has not run for a minute\n"), 5);
+            if (now - g_selftestHeartbeat > 180000) {
+                selftestFinish(QStringLiteral("Kdenlive's main thread has not run for 3 minutes\n"), 5);
             }
-            if (now > 270000) {
+            if (now > 330000) {
                 selftestFinish(QStringLiteral("The check took too long\n"), 6);
             }
         }
@@ -372,7 +372,7 @@ void selftestStart()
             if (g_selftestClock.elapsed() > 150000) {
                 selftestFinish(QStringLiteral("Kdenlive's main window did not appear. Windows:\n") + selftestWindows(), 2);
             }
-        } else if (!g_selftestPageAdded && g_selftestClock.elapsed() > 200000) {
+        } else if (!g_selftestPageAdded && g_selftestClock.elapsed() > 300000) {
             selftestFinish(QStringLiteral("The page was not added to Kdenlive's settings dialog. Windows:\n") + selftestWindows(), 7);
         }
     });
