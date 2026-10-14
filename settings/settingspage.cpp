@@ -51,6 +51,7 @@
 #include <QTimer>
 #include <QWindow>
 
+#include <atomic>
 #include <cstdlib>
 #endif
 
@@ -266,13 +267,25 @@ QString pageIcon()
  * A variant of the page for the workflow's check in Kdenlive itself, which
  * is not installed: once Kdenlive's main window is up, it opens the settings
  * dialog, shows the page, saves a screenshot of the dialog and a report in
- * the folder GPUFX_SELFTEST_OUTPUT names, and ends Kdenlive.
+ * the folder GPUFX_SELFTEST_OUTPUT names, and ends Kdenlive. A report also
+ * says where it stopped when something does not happen in time.
  */
+QElapsedTimer g_selftestClock;
+/** What the check is at, for the reports */
+std::atomic<int> g_selftestStage{0};
+const char *const kSelftestStages[] = {"waiting for the main window", "opening the settings dialog", "waiting for the page",
+                                       "showing the page"};
+/** The last time the main thread ran the check's timer */
+std::atomic<qint64> g_selftestHeartbeat{0};
+/** Whether the page was added to Kdenlive's settings dialog */
+bool g_selftestPageAdded = false;
+
 void selftestFinish(const QString &report, int code)
 {
     QFile file(QString::fromLocal8Bit(qgetenv("GPUFX_SELFTEST_OUTPUT")) + QStringLiteral("/kdenlive-report.txt"));
     if (file.open(QIODevice::WriteOnly)) {
         file.write(report.toUtf8());
+        file.write(QStringLiteral("after %1 s, %2\n").arg(g_selftestClock.elapsed() / 1000).arg(QLatin1String(kSelftestStages[g_selftestStage])).toUtf8());
         file.close();
     }
     std::_Exit(code);
@@ -324,22 +337,43 @@ QAction *selftestAction(const QString &name)
 
 void selftestStart()
 {
-    auto *timer = new QTimer(QCoreApplication::instance());
-    auto clock = std::make_shared<QElapsedTimer>();
-    clock->start();
-    QObject::connect(timer, &QTimer::timeout, timer, [timer, clock]() {
-        for (QWidget *widget : QApplication::topLevelWidgets()) {
-            if (!qobject_cast<QMainWindow *>(widget) || !widget->isVisible()) {
-                continue;
+    g_selftestClock.start();
+    // From another thread: reports when the main thread is stuck, or when
+    // the whole check takes too long
+    QThread *watchdog = QThread::create([]() {
+        for (;;) {
+            QThread::msleep(2000);
+            const qint64 now = g_selftestClock.elapsed();
+            if (now - g_selftestHeartbeat > 60000) {
+                selftestFinish(QStringLiteral("Kdenlive's main thread has not run for a minute\n"), 5);
             }
-            if (QAction *action = selftestAction(QStringLiteral("options_configure"))) {
-                timer->stop();
-                action->trigger();
-                return;
+            if (now > 270000) {
+                selftestFinish(QStringLiteral("The check took too long\n"), 6);
             }
         }
-        if (clock->elapsed() > 150000) {
-            selftestFinish(QStringLiteral("Kdenlive's main window did not appear. Windows:\n") + selftestWindows(), 2);
+    });
+    watchdog->start();
+
+    auto *timer = new QTimer(QCoreApplication::instance());
+    QObject::connect(timer, &QTimer::timeout, timer, []() {
+        g_selftestHeartbeat = g_selftestClock.elapsed();
+        if (g_selftestStage == 0) {
+            for (QWidget *widget : QApplication::topLevelWidgets()) {
+                if (!qobject_cast<QMainWindow *>(widget) || !widget->isVisible()) {
+                    continue;
+                }
+                if (QAction *action = selftestAction(QStringLiteral("options_configure"))) {
+                    g_selftestStage = 1;
+                    action->trigger();
+                    g_selftestStage = std::max(int(g_selftestStage), 2);
+                    return;
+                }
+            }
+            if (g_selftestClock.elapsed() > 150000) {
+                selftestFinish(QStringLiteral("Kdenlive's main window did not appear. Windows:\n") + selftestWindows(), 2);
+            }
+        } else if (!g_selftestPageAdded && g_selftestClock.elapsed() > 200000) {
+            selftestFinish(QStringLiteral("The page was not added to Kdenlive's settings dialog. Windows:\n") + selftestWindows(), 7);
         }
     });
     timer->start(500);
@@ -347,6 +381,8 @@ void selftestStart()
 
 void selftestReport(KConfigDialog *dialog, KPageWidgetItem *item, QLabel *status)
 {
+    g_selftestPageAdded = true;
+    g_selftestStage = 3;
     auto *timer = new QTimer(dialog);
     auto clock = std::make_shared<QElapsedTimer>();
     clock->start();

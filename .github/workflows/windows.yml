@@ -259,8 +259,11 @@ jobs:
           $kdenlive = Start-Process "$root\bin\kdenlive.exe" -PassThru
           # Keeps the handle, without which PowerShell loses the exit code
           $null = $kdenlive.Handle
-          $finished = $kdenlive.WaitForExit(240000)
-          if (-not $finished) { Stop-Process -Id $kdenlive.Id -Force }
+          $finished = $kdenlive.WaitForExit(330000)
+          if (-not $finished) {
+            Stop-Process -Id $kdenlive.Id -Force
+            $null = $kdenlive.WaitForExit(30000)
+          }
           Get-Content screenshot\kdenlive-report.txt -ErrorAction SilentlyContinue
           Copy-Item build\gpufx\gpufx-settings.dll "$root\lib\mlt\gpufx\gpufx-settings.dll" -Force
           if (-not $finished) { throw "Kdenlive did not finish" }
