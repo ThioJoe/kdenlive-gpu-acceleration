@@ -43,6 +43,15 @@
 #include <memory>
 #include <vector>
 
+#ifdef GPUFX_SETTINGS_SELFTEST
+#include <QAction>
+#include <QElapsedTimer>
+#include <QMainWindow>
+#include <QTimer>
+
+#include <cstdlib>
+#endif
+
 #if defined(_WIN32)
 #include <stdlib.h>
 #include <windows.h>
@@ -250,6 +259,71 @@ QString pageIcon()
     return QStringLiteral("configure");
 }
 
+#ifdef GPUFX_SETTINGS_SELFTEST
+/*
+ * A variant of the page for the workflow's check in Kdenlive itself, which
+ * is not installed: once Kdenlive's main window is up, it opens the settings
+ * dialog, shows the page, saves a screenshot of the dialog and a report in
+ * the folder GPUFX_SELFTEST_OUTPUT names, and ends Kdenlive.
+ */
+void selftestFinish(const QString &report, int code)
+{
+    QFile file(QString::fromLocal8Bit(qgetenv("GPUFX_SELFTEST_OUTPUT")) + QStringLiteral("/kdenlive-report.txt"));
+    if (file.open(QIODevice::WriteOnly)) {
+        file.write(report.toUtf8());
+        file.close();
+    }
+    std::_Exit(code);
+}
+
+void selftestStart()
+{
+    auto *timer = new QTimer(QCoreApplication::instance());
+    auto clock = std::make_shared<QElapsedTimer>();
+    clock->start();
+    QObject::connect(timer, &QTimer::timeout, timer, [timer, clock]() {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            auto *window = qobject_cast<QMainWindow *>(widget);
+            QAction *action = window && window->isVisible() ? window->findChild<QAction *>(QStringLiteral("options_configure")) : nullptr;
+            if (action) {
+                timer->stop();
+                action->trigger();
+                return;
+            }
+        }
+        if (clock->elapsed() > 150000) {
+            selftestFinish(QStringLiteral("Kdenlive's main window did not appear\n"), 2);
+        }
+    });
+    timer->start(500);
+}
+
+void selftestReport(KConfigDialog *dialog, KPageWidgetItem *item, QLabel *status)
+{
+    auto *timer = new QTimer(dialog);
+    auto clock = std::make_shared<QElapsedTimer>();
+    clock->start();
+    QObject::connect(timer, &QTimer::timeout, dialog, [=]() {
+        if (status->text().startsWith(QLatin1String("Checking")) && clock->elapsed() < 60000) {
+            return;
+        }
+        timer->stop();
+        dialog->setCurrentPage(item);
+        QTimer::singleShot(1000, dialog, [=]() {
+            QString report = QStringLiteral("dialog: %1 \"%2\"\n").arg(QLatin1String(dialog->metaObject()->className()), dialog->objectName());
+            report += QStringLiteral("current page: %1, icon %2\n").arg(dialog->currentPage() ? dialog->currentPage()->name() : QString(), item->icon().name());
+            report += QStringLiteral("status: %1\n").arg(status->text());
+            for (QCheckBox *box : item->widget()->findChildren<QCheckBox *>()) {
+                report += QStringLiteral("%1: %2%3\n").arg(box->objectName(), box->text(), box->isChecked() ? QString() : QStringLiteral(" (off)"));
+            }
+            const bool saved = dialog->grab().save(QString::fromLocal8Bit(qgetenv("GPUFX_SELFTEST_OUTPUT")) + QStringLiteral("/kdenlive-settings.png"));
+            selftestFinish(report, saved ? 0 : 3);
+        });
+    });
+    timer->start(200);
+}
+#endif
+
 void addPage(KConfigDialog *dialog)
 {
     auto *settings = new Settings(dialog);
@@ -301,6 +375,9 @@ void addPage(KConfigDialog *dialog)
         g_host->reload_settings();
     });
     showGpuStatus(status);
+#ifdef GPUFX_SETTINGS_SELFTEST
+    selftestReport(dialog, item, status);
+#endif
 }
 
 /** Adds the page to Kdenlive's settings dialog when it opens */
@@ -349,6 +426,9 @@ void start()
         return;
     }
     exportSettingsFile();
+#ifdef GPUFX_SETTINGS_SELFTEST
+    selftestStart();
+#endif
     // The filter must live in the application's thread
     auto *installer = new PageInstaller;
     installer->moveToThread(app->thread());

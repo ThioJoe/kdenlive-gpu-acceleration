@@ -114,7 +114,7 @@ jobs:
       - name: Check the settings page against Kdenlive's libraries
         run: |
           bin="$(cygpath -u "$KDENLIVE_ROOT")/bin"
-          for name in Qt6Core KF6ConfigCore; do
+          for name in Qt6Core libKF6ConfigCore; do
             echo "$name: Kdenlive $(powershell -NoProfile -Command "(Get-Item '$(cygpath -w "$bin/$name.dll")').VersionInfo.ProductVersion"), built with $(powershell -NoProfile -Command "(Get-Item '$(cygpath -w "/ucrt64/bin/$name.dll")').VersionInfo.ProductVersion")"
           done
           check_imports() {
@@ -128,11 +128,16 @@ jobs:
                 status=1
                 continue
               fi
-              # Imported names of this DLL, and the names Kdenlive's copy exports
-              objdump -p "$file" | awk -v dll="$dll" '/DLL Name:/ {inside = ($3 == dll); next} inside && /^\t[0-9a-f]+\t/ {print $NF}' | sort -u > imports.txt
-              objdump -p "$bin/$dll" | awk '/^\t\[ *[0-9]+\] / {print $NF}' | sort -u > exports.txt
+              # Imported names of this DLL, and the names Kdenlive's copy
+              # exports (objdump writes Windows line ends)
+              objdump -p "$file" | awk -v dll="$dll" '{sub(/\r$/, "")} /DLL Name:/ {inside = ($3 == dll); next} inside && /^\t[0-9a-f]+\t/ {print $NF}' | sort -u > imports.txt
+              objdump -p "$bin/$dll" | awk '{sub(/\r$/, "")} /^\t\[ *[0-9]+\] / {print $NF}' | sort -u > exports.txt
               missing=$(comm -23 imports.txt exports.txt)
               echo "$(basename "$file") -> $dll: $(wc -l < imports.txt) functions"
+              if [ ! -s imports.txt ]; then
+                echo "::error::No function found in the imports of $(basename "$file") from $dll"
+                status=1
+              fi
               if [ -n "$missing" ]; then
                 echo "::error::Kdenlive's $dll lacks functions that $(basename "$file") uses"
                 echo "$missing" | c++filt
@@ -214,12 +219,54 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-      - name: Upload a screenshot of the settings page
+      # The page in Kdenlive itself: a variant of the page opens Kdenlive's
+      # settings dialog once its main window is up, shows the page, and saves
+      # a screenshot and a report (see GPUFX_SETTINGS_SELFTEST)
+      - name: Open the page in Kdenlive
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $root = $env:KDENLIVE_ROOT
+          $bin = ($root -replace '\\', '/') + '/bin'
+          # Settings of a Kdenlive that ran before: no first run wizard and no
+          # welcome screen
+          $config = @"
+          [version]
+          version=$env:KDENLIVE_VERSION
+
+          [sdl]
+          sdlAudioBackend=wasapi
+
+          [env]
+          kdenliverendererpath=$bin/kdenlive_render.exe
+          meltpath=$bin/melt.exe
+          ffmpegpath=$bin/ffmpeg.exe
+          ffplaypath=$bin/ffplay.exe
+          ffprobepath=$bin/ffprobe.exe
+
+          [startup]
+          showWelcome=false
+          "@
+          Set-Content "$env:LOCALAPPDATA\kdenliverc" $config
+          Copy-Item build\gpufx\gpufx-settings-selftest.dll "$root\lib\mlt\gpufx\gpufx-settings.dll" -Force
+          $env:GPUFX_SELFTEST_OUTPUT = "$PWD\screenshot"
+          $env:GPUFX_CUDA_LIBRARY = "$PWD\build\tests\libgpufx_mockcuda.dll"
+          $kdenlive = Start-Process "$root\bin\kdenlive.exe" -PassThru
+          # Keeps the handle, without which PowerShell loses the exit code
+          $null = $kdenlive.Handle
+          $finished = $kdenlive.WaitForExit(240000)
+          if (-not $finished) { Stop-Process -Id $kdenlive.Id -Force }
+          Get-Content screenshot\kdenlive-report.txt -ErrorAction SilentlyContinue
+          Copy-Item build\gpufx\gpufx-settings.dll "$root\lib\mlt\gpufx\gpufx-settings.dll" -Force
+          if (-not $finished) { throw "Kdenlive did not finish" }
+          if ($kdenlive.ExitCode -ne 0) { throw "The check in Kdenlive failed with code $($kdenlive.ExitCode)" }
+
+      - name: Upload screenshots of the settings page
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: settings-page-screenshot
+          name: settings-page-screenshots
           path: screenshot/
-          if-no-files-found: error
 
       - name: Summary
         shell: bash
@@ -237,4 +284,6 @@ jobs:
             tail -n 1 test.log
             tail -n 1 settings-test.log
             echo '```'
+            echo
+            echo "**settings-page-screenshots** shows the settings page in a test dialog and, if Kdenlive started on the runner, in Kdenlive's own settings dialog."
           } >> "$GITHUB_STEP_SUMMARY"
