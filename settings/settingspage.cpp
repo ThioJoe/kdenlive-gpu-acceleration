@@ -49,6 +49,7 @@
 #include <QElapsedTimer>
 #include <QMainWindow>
 #include <QTimer>
+#include <QFileInfo>
 #include <QWindow>
 
 #include <atomic>
@@ -291,6 +292,85 @@ void selftestFinish(const QString &report, int code)
     std::_Exit(code);
 }
 
+#if defined(_WIN32)
+/** The main thread, whose stack a report shows when it is stuck */
+DWORD g_selftestMainThread = 0;
+
+/** Module, nearest exported function and offset of a code address */
+QString selftestAddress(DWORD64 address)
+{
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(address),
+                            &module)) {
+        return QStringLiteral("0x%1").arg(address, 0, 16);
+    }
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(module, path, MAX_PATH);
+    const QString name = QFileInfo(QString::fromWCharArray(path)).fileName();
+    const auto *base = reinterpret_cast<const BYTE *>(module);
+    const DWORD offset = DWORD(address - reinterpret_cast<DWORD64>(base));
+    const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
+    const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    const IMAGE_DATA_DIRECTORY &directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    DWORD best = 0;
+    const char *bestName = nullptr;
+    if (directory.Size) {
+        const auto *exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY *>(base + directory.VirtualAddress);
+        const auto *names = reinterpret_cast<const DWORD *>(base + exports->AddressOfNames);
+        const auto *ordinals = reinterpret_cast<const WORD *>(base + exports->AddressOfNameOrdinals);
+        const auto *functions = reinterpret_cast<const DWORD *>(base + exports->AddressOfFunctions);
+        for (DWORD i = 0; i < exports->NumberOfNames; ++i) {
+            const DWORD rva = functions[ordinals[i]];
+            if (rva <= offset && rva > best) {
+                best = rva;
+                bestName = reinterpret_cast<const char *>(base + names[i]);
+            }
+        }
+    }
+    if (bestName) {
+        return QStringLiteral("%1!%2+0x%3").arg(name, QLatin1String(bestName)).arg(offset - best, 0, 16);
+    }
+    return QStringLiteral("%1+0x%2").arg(name).arg(offset, 0, 16);
+}
+
+/** The stack of the main thread, unwound with the functions' unwind data */
+QString selftestMainStack()
+{
+    HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, g_selftestMainThread);
+    if (!thread) {
+        return QStringLiteral("cannot open the main thread\n");
+    }
+    QString text = QStringLiteral("main thread:\n");
+    SuspendThread(thread);
+    CONTEXT context = {};
+    context.ContextFlags = CONTEXT_FULL;
+    if (GetThreadContext(thread, &context)) {
+        for (int frame = 0; frame < 48 && context.Rip; ++frame) {
+            text += QStringLiteral("  %1\n").arg(selftestAddress(context.Rip));
+            DWORD64 imageBase = 0;
+            PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
+            if (function) {
+                PVOID handlerData = nullptr;
+                DWORD64 establisherFrame = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context.Rip, function, &context, &handlerData, &establisherFrame, nullptr);
+            } else {
+                // A leaf function: the return address is on top of the stack
+                context.Rip = *reinterpret_cast<DWORD64 *>(context.Rsp);
+                context.Rsp += 8;
+            }
+        }
+    }
+    ResumeThread(thread);
+    CloseHandle(thread);
+    return text;
+}
+#else
+QString selftestMainStack()
+{
+    return {};
+}
+#endif
+
 /** The application's windows, for a report when the settings dialog does
  *  not open */
 QString selftestWindows()
@@ -338,17 +418,20 @@ QAction *selftestAction(const QString &name)
 void selftestStart()
 {
     g_selftestClock.start();
+#if defined(_WIN32)
+    g_selftestMainThread = GetCurrentThreadId();
+#endif
     // From another thread: reports when the main thread is stuck, or when
     // the whole check takes too long
     QThread *watchdog = QThread::create([]() {
         for (;;) {
             QThread::msleep(2000);
             const qint64 now = g_selftestClock.elapsed();
-            if (now - g_selftestHeartbeat > 180000) {
-                selftestFinish(QStringLiteral("Kdenlive's main thread has not run for 3 minutes\n"), 5);
+            if (now - g_selftestHeartbeat > 90000) {
+                selftestFinish(QStringLiteral("Kdenlive's main thread has not run for 90 s\n") + selftestMainStack(), 5);
             }
             if (now > 330000) {
-                selftestFinish(QStringLiteral("The check took too long\n"), 6);
+                selftestFinish(QStringLiteral("The check took too long\n") + selftestMainStack(), 6);
             }
         }
     });
