@@ -41,6 +41,7 @@
 #include <QXmlStreamReader>
 
 #include <algorithm>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -73,6 +74,29 @@ const gpufx_settings_host *g_host = nullptr;
 
 /** Dynamic property of the dialog: its page item, once the page is added */
 const char *const kPageProperty = "gpufx_page";
+
+/** Runs a function in a thread of its own. Not QThread::create(), which
+ *  hands Qt a std::future: this library has its own copy of the C++ runtime,
+ *  whose objects Kdenlive's Qt must not use (a thread waiting on such a
+ *  future hangs in Kdenlive). */
+class FunctionThread : public QThread
+{
+public:
+    explicit FunctionThread(std::function<void()> function)
+        : m_function(std::move(function))
+    {
+        connect(this, &QThread::finished, this, &QObject::deleteLater);
+    }
+
+protected:
+    void run() override
+    {
+        m_function();
+    }
+
+private:
+    std::function<void()> m_function;
+};
 
 /** Something the module can run on the GPU, and its switch on the page */
 struct Service
@@ -239,7 +263,7 @@ QString gpuStatus(const QString &description)
 void showGpuStatus(QLabel *label)
 {
     QPointer<QLabel> target(label);
-    QThread *thread = QThread::create([target]() {
+    auto *thread = new FunctionThread([target]() {
         char text[2048] = {};
         g_host->describe_gpu(text, sizeof(text));
         const QString status = gpuStatus(QString::fromUtf8(text));
@@ -252,7 +276,6 @@ void showGpuStatus(QLabel *label)
             },
             Qt::QueuedConnection);
     });
-    QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
     thread->start();
 }
 
@@ -452,7 +475,7 @@ void selftestStart()
 #endif
     // From another thread: reports when the main thread is stuck, or when
     // the whole check takes too long
-    QThread *watchdog = QThread::create([]() {
+    auto *watchdog = new FunctionThread([]() {
         for (;;) {
             QThread::msleep(2000);
             const qint64 now = g_selftestClock.elapsed();
