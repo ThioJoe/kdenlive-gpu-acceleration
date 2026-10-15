@@ -59,6 +59,9 @@
 #if defined(_WIN32)
 #include <stdlib.h>
 #include <windows.h>
+#ifdef GPUFX_SETTINGS_SELFTEST
+#include <tlhelp32.h>
+#endif
 #define GPUFX_SETTINGS_EXPORT __declspec(dllexport)
 #else
 #define GPUFX_SETTINGS_EXPORT __attribute__((visibility("default")))
@@ -333,20 +336,22 @@ QString selftestAddress(DWORD64 address)
     return QStringLiteral("%1+0x%2").arg(name).arg(offset, 0, 16);
 }
 
-/** The stack of the main thread, unwound with the functions' unwind data */
-QString selftestMainStack()
+/** The stack of a thread, unwound with the functions' unwind data */
+QString selftestStack(DWORD threadId)
 {
-    HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, g_selftestMainThread);
+    HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, threadId);
     if (!thread) {
-        return QStringLiteral("cannot open the main thread\n");
+        return QStringLiteral("cannot open thread %1\n").arg(threadId);
     }
-    QString text = QStringLiteral("main thread:\n");
+    // No allocation while the thread is suspended: it may hold the heap's lock
+    DWORD64 frames[24];
+    int count = 0;
     SuspendThread(thread);
     CONTEXT context = {};
     context.ContextFlags = CONTEXT_FULL;
     if (GetThreadContext(thread, &context)) {
-        for (int frame = 0; frame < 48 && context.Rip; ++frame) {
-            text += QStringLiteral("  %1\n").arg(selftestAddress(context.Rip));
+        while (count < 24 && context.Rip) {
+            frames[count++] = context.Rip;
             DWORD64 imageBase = 0;
             PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
             if (function) {
@@ -362,6 +367,30 @@ QString selftestMainStack()
     }
     ResumeThread(thread);
     CloseHandle(thread);
+    QString text = QStringLiteral("thread %1%2:\n").arg(threadId).arg(threadId == g_selftestMainThread ? QStringLiteral(" (main)") : QString());
+    for (int i = 0; i < count; ++i) {
+        text += QStringLiteral("  %1\n").arg(selftestAddress(frames[i]));
+    }
+    return text;
+}
+
+/** The stacks of the main thread and of every other thread of the process */
+QString selftestMainStack()
+{
+    QString text = selftestStack(g_selftestMainThread);
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return text;
+    }
+    THREADENTRY32 entry = {};
+    entry.dwSize = sizeof(entry);
+    for (BOOL more = Thread32First(snapshot, &entry); more; more = Thread32Next(snapshot, &entry)) {
+        if (entry.th32OwnerProcessID == GetCurrentProcessId() && entry.th32ThreadID != g_selftestMainThread
+            && entry.th32ThreadID != GetCurrentThreadId()) {
+            text += selftestStack(entry.th32ThreadID);
+        }
+    }
+    CloseHandle(snapshot);
     return text;
 }
 #else

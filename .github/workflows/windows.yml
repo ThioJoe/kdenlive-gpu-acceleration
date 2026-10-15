@@ -268,6 +268,8 @@ jobs:
             $null = $kdenlive.WaitForExit(30000)
           }
           Get-Content screenshot\kdenlive-report.txt -ErrorAction SilentlyContinue
+          # Crash reports of Kdenlive's crash handler, if any
+          Get-ChildItem "$root\bin", $env:TEMP, $env:LOCALAPPDATA -Filter *.RPT -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "--- $($_.FullName)"; Get-Content $_.FullName -TotalCount 80 }
           Copy-Item build\gpufx\gpufx-settings.dll "$root\lib\mlt\gpufx\gpufx-settings.dll" -Force
           if (-not $finished) { throw "Kdenlive did not finish" }
           if ($kdenlive.ExitCode -ne 0) { throw "The check in Kdenlive failed with code $($kdenlive.ExitCode)" }
