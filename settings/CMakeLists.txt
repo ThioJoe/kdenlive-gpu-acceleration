@@ -9,7 +9,7 @@
 set(targets gpufx-settings)
 if(BUILD_TESTING)
     # A variant that opens the page in Kdenlive and takes a screenshot, for
-    # the Windows workflow (see GPUFX_SETTINGS_SELFTEST). Not installed.
+    # the Windows workflow (see selftest.cpp). Not installed.
     list(APPEND targets gpufx-settings-selftest)
 endif()
 foreach(target ${targets})
@@ -32,6 +32,7 @@ foreach(target ${targets})
     )
 endforeach()
 if(TARGET gpufx-settings-selftest)
+    target_sources(gpufx-settings-selftest PRIVATE selftest.cpp)
     target_compile_definitions(gpufx-settings-selftest PRIVATE GPUFX_SETTINGS_SELFTEST)
 endif()
 install(TARGETS gpufx-settings

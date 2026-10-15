@@ -226,9 +226,11 @@ compiles the module with MSYS2's UCRT toolchain against the `libmlt-7.dll` of
 the official build, and the settings page with MSYS2's Qt and KDE Frameworks.
 The page runs with Kdenlive's own copies of those libraries, which can be
 older, so the workflow checks that every function it uses is in them. It runs
-the tests inside that build with the emulated GPU, and uploads both libraries
-in a `kdenlive-<version>_standalone` folder that merges into an installed one,
-along with a screenshot of the settings page. Run it by hand (*Actions > Run
+the tests inside that build with the emulated GPU, then starts Kdenlive itself
+with a variant of the page that opens Kdenlive's settings dialog, shows the
+page and takes a screenshot. It uploads both libraries in a
+`kdenlive-<version>_standalone` folder that merges into an installed one, and
+the screenshots of the settings page. Run it by hand (*Actions > Run
 workflow*) to build for another Kdenlive version.
 
 The CUDA kernels in `kernels/gpufx_kernels.cu` are shipped compiled to PTX in

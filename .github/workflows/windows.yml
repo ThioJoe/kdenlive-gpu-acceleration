@@ -232,6 +232,7 @@ jobs:
       # settings dialog once its main window is up, shows the page, and saves
       # a screenshot and a report (see GPUFX_SETTINGS_SELFTEST)
       - name: Open the page in Kdenlive
+        id: kdenlive
         continue-on-error: true
         shell: pwsh
         run: |
@@ -259,8 +260,8 @@ jobs:
           $env:GPUFX_CUDA_LIBRARY = "$PWD\build\tests\libgpufx_mockcuda.dll"
           # Runs Kdenlive with the check, which saves its report and
           # screenshot in screenshot\<name>
-          function Test-Kdenlive([string]$name, [string]$page, [string]$moreConfig) {
-            Set-Content "$env:LOCALAPPDATA\kdenliverc" ($config + $moreConfig)
+          function Test-Kdenlive([string]$name, [string]$page) {
+            Set-Content "$env:LOCALAPPDATA\kdenliverc" $config
             $env:GPUFX_SELFTEST_OUTPUT = "$PWD\screenshot\$name"
             $env:GPUFX_SELFTEST_PAGE = $page
             $null = New-Item -ItemType Directory -Force $env:GPUFX_SELFTEST_OUTPUT
@@ -277,18 +278,15 @@ jobs:
             if (-not $finished) { return "did not finish" }
             return "exit code $($kdenlive.ExitCode)"
           }
-          # The dialog without the page, to compare with Kdenlive on its own;
-          # with the page; and with the page but without KDE's check of
-          # keyboard accelerators, which reacts to every widget's activation
-          $without = Test-Kdenlive "without-page" "0" ""
-          $with = Test-Kdenlive "with-page" "1" ""
-          $noCheck = Test-Kdenlive "with-page-no-accelerator-check" "1" "`n[Development]`nAutoCheckAccelerators=false`n"
+          # The dialog with the page, then without it, which tells whether a
+          # failure comes from the page or from Kdenlive on the runner
+          $with = Test-Kdenlive "with-page" "1"
+          $without = Test-Kdenlive "without-page" "0"
           # Crash reports of Kdenlive's crash handler, if any
           Get-ChildItem "$root\bin", $env:TEMP, $env:LOCALAPPDATA -Filter *.RPT -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "--- $($_.FullName)"; Get-Content $_.FullName -TotalCount 80 }
           Copy-Item build\gpufx\gpufx-settings.dll "$root\lib\mlt\gpufx\gpufx-settings.dll" -Force
-          Write-Output "without the page: $without"
           Write-Output "with the page: $with"
-          Write-Output "with the page, without the accelerator check: $noCheck"
+          Write-Output "without the page: $without"
           if ($with -ne "exit code 0") { throw "The check in Kdenlive failed: $with" }
 
       - name: Upload screenshots of the settings page
@@ -300,6 +298,8 @@ jobs:
 
       - name: Summary
         shell: bash
+        env:
+          KDENLIVE_CHECK: ${{ steps.kdenlive.outcome }}
         run: |
           {
             echo "### GPU effects module for Kdenlive ${KDENLIVE_VERSION} on Windows"
@@ -315,5 +315,10 @@ jobs:
             tail -n 1 settings-test.log
             echo '```'
             echo
-            echo "**settings-page-screenshots** shows the settings page in a test dialog and, if Kdenlive started on the runner, in Kdenlive's own settings dialog."
+            if [ "$KDENLIVE_CHECK" = success ]; then
+              echo "The settings page also opened in Kdenlive's own settings dialog on the runner."
+            else
+              echo "The check that opens the settings page in Kdenlive's own settings dialog failed: see the log of its step."
+            fi
+            echo "**settings-page-screenshots** shows the page in a test dialog and in Kdenlive's settings dialog."
           } >> "$GITHUB_STEP_SUMMARY"
