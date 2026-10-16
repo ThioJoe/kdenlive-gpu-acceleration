@@ -29,6 +29,13 @@ Kdenlive folder and let Windows merge them. It adds
 `lib\mlt\libmltgpufx.dll` and `lib\mlt\gpufx\gpufx-settings.dll`. To
 uninstall, delete `libmltgpufx.dll` and the `gpufx` folder.
 
+Or let [Tools/Install-Gpufx.ps1](Tools/Install-Gpufx.ps1) download the latest
+release for your Kdenlive version and copy both files, given the Kdenlive folder:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Tools\Install-Gpufx.ps1 "C:\path\to\kdenlive-26.08.1_standalone"
+```
+
 ## Accelerated effects
 
 | Kdenlive effect                     | MLT service          | Notes |
