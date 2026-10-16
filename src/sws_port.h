@@ -1,6 +1,6 @@
 /*
     SPDX-FileCopyrightText: FFmpeg developers
-    SPDX-FileCopyrightText: 2026 Kdenlive contributors
+    SPDX-FileCopyrightText: 2026 ThioJoe
     SPDX-License-Identifier: LGPL-2.1-or-later
 */
 

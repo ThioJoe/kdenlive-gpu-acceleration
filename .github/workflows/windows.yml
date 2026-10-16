@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2026 Kdenlive contributors
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-FileCopyrightText: 2026 ThioJoe
+# SPDX-License-Identifier: GPL-3.0-only
 #
 # Builds the GPU effects module (gpufx, see README.md) and its settings page
 # for Kdenlive's Windows standalone build, tests them inside that build, and

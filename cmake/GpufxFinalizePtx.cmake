@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2026 Kdenlive contributors
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-FileCopyrightText: 2026 ThioJoe
+# SPDX-License-Identifier: GPL-3.0-only
 
 # Turns the PTX written by nvcc into the file shipped with the sources:
 #  - adds a license header (PTX accepts // comments)
@@ -21,5 +21,5 @@ endif()
 # Drop the compiler banner, it contains build specific information
 string(REGEX REPLACE "^(//[^\n]*\n)+" "" ptx "${ptx}")
 
-set(header "//\n// SPDX-FileCopyrightText: 2026 Kdenlive contributors\n// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL\n//\n// Generated from gpufx_kernels.cu, do not edit.\n// Rebuild with: cmake --build <builddir> --target gpufx_update_ptx\n//\n")
+set(header "//\n// SPDX-FileCopyrightText: 2026 ThioJoe\n// SPDX-License-Identifier: GPL-3.0-only\n//\n// Generated from gpufx_kernels.cu, do not edit.\n// Rebuild with: cmake --build <builddir> --target gpufx_update_ptx\n//\n")
 file(WRITE "${OUTPUT}" "${header}${ptx}")

@@ -1,6 +1,6 @@
 /*
     SPDX-FileCopyrightText: 2016 The Qt Company Ltd.
-    SPDX-FileCopyrightText: 2026 Kdenlive contributors
+    SPDX-FileCopyrightText: 2026 ThioJoe
     SPDX-License-Identifier: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
 */
 

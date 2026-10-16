@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2026 Kdenlive contributors
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-FileCopyrightText: 2026 ThioJoe
+# SPDX-License-Identifier: GPL-3.0-only
 
 # The module's page in Kdenlive's settings dialog (see settingspage.cpp). It
 # uses Qt and KDE Frameworks, which Kdenlive has loaded already: the module

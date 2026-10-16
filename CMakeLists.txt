@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2026 Kdenlive contributors
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-FileCopyrightText: 2026 ThioJoe
+# SPDX-License-Identifier: GPL-3.0-only
 
 # GPU acceleration for Kdenlive: gpufx, an MLT module running some MLT filters
 # on NVIDIA GPUs with CUDA. See README.md.

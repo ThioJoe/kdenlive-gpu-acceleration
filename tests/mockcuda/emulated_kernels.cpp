@@ -1,6 +1,6 @@
 /*
-    SPDX-FileCopyrightText: 2026 Kdenlive contributors
-    SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+    SPDX-FileCopyrightText: 2026 ThioJoe
+    SPDX-License-Identifier: GPL-3.0-only
 */
 
 // The CUDA kernels, built as plain C++ for the emulated driver.

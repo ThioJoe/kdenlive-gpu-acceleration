@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2026 Kdenlive contributors
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-FileCopyrightText: 2026 ThioJoe
+# SPDX-License-Identifier: GPL-3.0-only
 
 # Emulated CUDA driver: runs the kernels on the CPU (see mockcuda/mockcuda.cpp)
 add_library(gpufx_mockcuda MODULE

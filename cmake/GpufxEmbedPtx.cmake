@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2026 Kdenlive contributors
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-FileCopyrightText: 2026 ThioJoe
+# SPDX-License-Identifier: GPL-3.0-only
 
 # Writes a C++ source defining gpufx_ptx[], the NUL terminated content of the
 # PTX file, and gpufx_ptx_size.
