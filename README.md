@@ -10,7 +10,9 @@ with CUDA. It does not add new effects: projects keep using the regular
 effects and parameters, and render the same with or without the module, with
 or without an NVIDIA GPU.
 
-Kdenlive itself is not modified. The module is one library that goes into
+Kdenlive itself is not modified. It's just 2 `.dll` files that are added within the Kdenlive program directory, and is loaded automatically.
+
+The module is one library that goes into
 MLT's module folder of an installed Kdenlive (`lib\mlt` on Windows), and it
 is used by every process that loads MLT from there: Kdenlive itself (monitors,
 timeline preview) and the render processes. A second library adds a page to
