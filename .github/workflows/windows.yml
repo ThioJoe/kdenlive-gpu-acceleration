@@ -108,6 +108,21 @@ jobs:
             esac
           done
 
+      # The libraries of Kdenlive's build whose behaviour the module copies or
+      # whose functions it uses, with their versions and SHA-256, to compare
+      # Kdenlive versions
+      - name: List the libraries the module depends on
+        shell: pwsh
+        run: |
+          $root = $env:KDENLIVE_ROOT
+          $files = @(Get-ChildItem "$root\bin" -File | Where-Object { $_.Name -match '^(libmlt(\+\+)?-7|Qt6(Core|Gui|Widgets)|(avcodec|avformat|avutil|swscale)-\d+|libKF6Config(Core|Widgets))\.dll$' })
+          $files += Get-ChildItem "$root\lib\mlt" -File -Filter *.dll
+          $files += Get-ChildItem "$root\lib\frei0r-1" -File -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -in 'squareblur', 'glow', 'softglow', 'sharpness' }
+          foreach ($file in $files) {
+            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.Substring(0, 16)
+            '{0,-45} {1,-22} {2,10} {3}' -f $file.FullName.Substring($root.Length + 1), $file.VersionInfo.FileVersion, $file.Length, $hash
+          }
+
       # The page is built with MSYS2's Qt and KDE Frameworks but runs with
       # Kdenlive's, which can be older: every function it imports must be in
       # Kdenlive's libraries.
