@@ -115,6 +115,8 @@ jobs:
         shell: pwsh
         run: |
           $root = $env:KDENLIVE_ROOT
+          $mlt = & "$root\bin\melt.exe" -version 2>&1 | Select-Object -First 1
+          "MLT: $mlt"
           $files = @(Get-ChildItem "$root\bin" -File | Where-Object { $_.Name -match '^(libmlt(\+\+)?-7|Qt6(Core|Gui|Widgets)|(avcodec|avformat|avutil|swscale)-\d+|libKF6Config(Core|Widgets))\.dll$' })
           $files += Get-ChildItem "$root\lib\mlt" -File -Filter *.dll
           $files += Get-ChildItem "$root\lib\frei0r-1" -File -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -in 'squareblur', 'glow', 'softglow', 'sharpness' }
