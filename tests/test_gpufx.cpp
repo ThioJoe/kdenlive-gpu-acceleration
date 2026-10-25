@@ -851,10 +851,12 @@ std::string tempPath(const std::string &name);
  *  transition of 10 frames. With converters, the clips have an avcolor_space
  *  filter, which lets MLT convert their images as the loader's does. With a
  *  background, the tractor is a track composited onto it by a qtblend
- *  transition, as in Kdenlive's projects. */
+ *  transition, as in Kdenlive's projects. The images are asked for in RGBA,
+ *  or in YUV 4:2:2 as consumers do: the YUYV image followed by its alpha
+ *  plane, if any. */
 std::vector<Image> renderLuma(mlt_profile profile, const Image &bottom, const Image &top, const std::vector<FilterSpec> &bottomFilters,
                               const std::vector<FilterSpec> &topFilters, const Properties &lumaProperties, bool cpu, const std::vector<mlt_position> &positions,
-                              bool converters = true, const Image *background = nullptr)
+                              bool converters = true, const Image *background = nullptr, mlt_image_format requestFormat = mlt_image_rgba)
 {
     mlt_tractor tractor = mlt_tractor_new();
     mlt_multitrack multitrack = mlt_tractor_multitrack(tractor);
@@ -890,6 +892,11 @@ std::vector<Image> renderLuma(mlt_profile profile, const Image &bottom, const Im
     if (background) {
         outer = mlt_tractor_new();
         mlt_producer producer = patternProducer(profile, background);
+        if (converters) {
+            mlt_filter converter = mlt_factory_filter(profile, "avcolor_space", nullptr);
+            mlt_producer_attach(producer, converter);
+            filters.push_back(converter);
+        }
         producers.push_back(producer);
         mlt_multitrack_connect(mlt_tractor_multitrack(outer), producer, 0);
         mlt_multitrack_connect(mlt_tractor_multitrack(outer), MLT_TRACTOR_PRODUCER(tractor), 1);
@@ -907,13 +914,20 @@ std::vector<Image> renderLuma(mlt_profile profile, const Image &bottom, const Im
         Image output;
         if (frame) {
             uint8_t *image = nullptr;
-            mlt_image_format format = mlt_image_rgba;
+            mlt_image_format format = requestFormat;
             int width = profile->width;
             int height = profile->height;
-            if (!mlt_frame_get_image(frame, &image, &format, &width, &height, 0) && image && format == mlt_image_rgba) {
+            if (!mlt_frame_get_image(frame, &image, &format, &width, &height, 0) && image && format == requestFormat) {
                 output.width = width;
                 output.height = height;
-                output.pixels.assign(image, image + size_t(width) * size_t(height) * 4);
+                const size_t pixels = size_t(width) * size_t(height);
+                output.pixels.assign(image, image + pixels * (format == mlt_image_rgba ? 4 : 2));
+                if (format == mlt_image_yuv422) {
+                    if (const uint8_t *alpha = mlt_frame_get_alpha(frame)) {
+                        output.pixels.insert(output.pixels.end(), alpha, alpha + pixels);
+                    }
+                    output.pixels.resize((output.pixels.size() + 3) / 4 * 4);
+                }
             } else {
                 fprintf(stderr, "luma: get_image failed, format %d\n", int(format));
             }
@@ -1003,12 +1017,14 @@ void testLuma(mlt_profile profile)
             const Image top = makeImage(profile->width, profile->height, c.topPattern);
             // The clips have an effect on the GPU, the transition finds their
             // images there
-            const std::vector<Image> cpu = renderLuma(profile, bottom, top, blur, blur, c.properties, true, positions, c.converters);
-            const std::vector<Image> gpu = renderLuma(profile, bottom, top, blur, blur, c.properties, false, positions, c.converters);
-            for (size_t i = 0; i < positions.size(); ++i) {
-                const Difference d = compare(cpu[i], gpu[i]);
-                check(!cpu[i].pixels.empty() && !d.sizeMismatch && d.pixels == 0, "luma, %s, colorspace %d, frame %d: %ld pixels differ, channel diff %d", c.what,
-                      colorspace, int(positions[i]), d.pixels, d.maxChannel);
+            for (mlt_image_format request : {mlt_image_rgba, mlt_image_yuv422}) {
+                const std::vector<Image> cpu = renderLuma(profile, bottom, top, blur, blur, c.properties, true, positions, c.converters, nullptr, request);
+                const std::vector<Image> gpu = renderLuma(profile, bottom, top, blur, blur, c.properties, false, positions, c.converters, nullptr, request);
+                for (size_t i = 0; i < positions.size(); ++i) {
+                    const Difference d = compare(cpu[i], gpu[i]);
+                    check(!cpu[i].pixels.empty() && !d.sizeMismatch && d.pixels == 0, "luma, %s, colorspace %d, %s, frame %d: %ld pixels differ, channel diff %d",
+                          c.what, colorspace, mlt_image_format_name(request), int(positions[i]), d.pixels, d.maxChannel);
+                }
             }
         }
     }
@@ -1016,8 +1032,8 @@ void testLuma(mlt_profile profile)
     profile->colorspace = profileColorspace;
 
     if (g_mock.active() && hasFilter("box_blur")) {
-        // Images in host memory are blended on the CPU, apart from the YUV
-        // dissolve, which also saves conversions
+        // Images in host memory are blended in RGBA on the CPU, in YUV on the
+        // GPU, which also saves the conversions
         for (size_t index : {size_t(0), size_t(3), size_t(10)}) {
             const Image bottom = makeImage(profile->width, profile->height, 1);
             const Image top = makeImage(profile->width, profile->height, 2);
@@ -1025,6 +1041,13 @@ void testLuma(mlt_profile profile)
             renderLuma(profile, bottom, top, none, none, cases[index].properties, false, {4});
             check((g_mock.stats().launches > 0) == (index == 3), "luma, %s, images in host memory: %llu kernel launches", cases[index].what,
                   (unsigned long long)g_mock.stats().launches);
+            // Kdenlive's projects set fix_background_alpha, which the YUV paths need
+            Properties properties = cases[index].properties;
+            properties.push_back({"fix_background_alpha", "1"});
+            // (the first frame of a wipe loads the luma map on the CPU)
+            g_mock.reset();
+            renderLuma(profile, bottom, top, none, none, properties, false, {3, 4}, true, nullptr, mlt_image_yuv422);
+            check(g_mock.stats().launches > 0, "luma, %s, images in host memory, YUV 4:2:2: blended on the CPU", cases[index].what);
         }
 
         // Clips whose images are on the GPU stay there through the
@@ -1060,6 +1083,23 @@ void testLuma(mlt_profile profile)
             // Besides the results, the compositing downloads its opacity checks
             check(trackStats.downloads == downloads + 2, "luma, %s, in a composited track: %llu downloads for 2 frames", c.what,
                   (unsigned long long)trackStats.downloads);
+
+            // A consumer asks for YUV 4:2:2, and the compositing asks the track
+            // for it first: the transition's YUV result stays on the GPU, one
+            // download per frame
+            const std::vector<Image> cpuYuv = renderLuma(profile, bottom, top, blur, blur, c.properties, true, two, true, &background, mlt_image_yuv422);
+            g_mock.reset();
+            const std::vector<Image> gpuYuv = renderLuma(profile, bottom, top, blur, blur, c.properties, false, two, true, &background, mlt_image_yuv422);
+            const MockCudaStats yuvStats = g_mock.stats();
+            for (size_t i = 0; i < two.size(); ++i) {
+                const Difference d = compare(cpuYuv[i], gpuYuv[i]);
+                check(!cpuYuv[i].pixels.empty() && !d.sizeMismatch && d.pixels == 0, "luma, %s, in a composited track, YUV 4:2:2, frame %d: %ld pixels differ",
+                      c.what, int(two[i]), d.pixels);
+            }
+            const uint64_t frameBytes = uint64_t(profile->width) * uint64_t(profile->height) * 3;
+            check(index == 10 || yuvStats.downloadedBytes < 2 * frameBytes + 64, "luma, %s, in a composited track, YUV 4:2:2: %llu bytes downloaded for 2 frames",
+                  c.what, (unsigned long long)yuvStats.downloadedBytes);
+            check(yuvStats.misuse == 0, "luma, %s, in a composited track, YUV 4:2:2: %llu invalid CUDA calls", c.what, (unsigned long long)yuvStats.misuse);
         }
     }
     remove(map.c_str());

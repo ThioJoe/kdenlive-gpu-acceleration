@@ -181,20 +181,25 @@ Kdenlive's dissolves, same-track mixes and wipes use MLT's `luma`
 transition, which takes one of several code paths depending on its settings.
 The GPU version follows the same paths with the same arithmetic:
 
-* Without *Use transparency* (Kdenlive's default), MLT converts both images
-  to YUV 4:2:2, blends them there in fixed point (with the SSE2 code of
-  MLT's x86-64 builds, whose rounding differs from its C code) and converts
-  the result back to RGBA. All of it runs on the GPU, so these dissolves run
-  there even when both clips are in host memory.
-* With *Use transparency*, and for wipes along a luma map, the images are
+* When the track compositing above asks for YUV 4:2:2 (Kdenlive's
+  compositing does when it may pass the track's image on unchanged), and
+  for dissolves without *Use transparency* (Kdenlive's default), MLT
+  converts both images to YUV 4:2:2 and blends them there: in fixed point
+  (with the SSE2 code of MLT's x86-64 builds, whose rounding differs from
+  its C code), in floating point for transparent images with *Use
+  transparency*, or along the luma map for wipes. All of it runs on the GPU,
+  so these run there even when both clips are in host memory, and the YUV
+  result stays on the GPU for the compositing, which converts it back to
+  RGBA there.
+* When RGBA is asked for, dissolves with *Use transparency* and wipes are
   blended in RGBA. Like track compositing, this only runs on the GPU when an
   image is there already.
 
 These stay on the CPU: interlaced wipes, *Invert* on a wipe, video clips as
-luma maps, dissolves with *Make padding transparent* turned off and without
-*Use transparency*, and with MLT 7.41 development versions, wipes without
-*Use transparency* (MLT 7.42 changed how they blend transparent images). The
-first frame of a wipe is blended on the CPU, which loads the luma map.
+luma maps, the YUV paths with *Make padding transparent* turned off, and
+with MLT 7.41 development versions, wipes without *Use transparency* (MLT
+7.42 changed how they blend transparent images). The first frame of a wipe
+is blended on the CPU, which loads the luma map.
 
 ### Image conversions
 

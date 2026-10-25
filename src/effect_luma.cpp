@@ -8,13 +8,16 @@
  * for its dissolves, same-track mixes and wipes. Depending on its properties
  * and on the format asked for, transition_get_image() takes one of several
  * code paths; these run on the GPU with the same arithmetic:
- *  - without a luma map and with alpha_over: dissolve_rgba32()
- *  - without a luma map, without alpha_over (Kdenlive's default): both images
- *    converted to YUV 4:2:2, dissolve_yuv422() with composite_line_yuv(),
- *    and the result converted back to RGBA for the caller
- *  - with a luma map (wipes): luma_composite_rgba32(), progressive frames
- * The other cases (interlaced or inverted wipes, luma maps from video
- * clips, other formats than RGBA) stay on the CPU.
+ *  - RGBA asked for, without a luma map and with alpha_over:
+ *    dissolve_rgba32()
+ *  - RGBA asked for, with a luma map (wipes): luma_composite_rgba32()
+ *  - otherwise, both images converted to YUV 4:2:2 (fix_background_alpha),
+ *    and dissolve_yuv422() or luma_composite_yuv422(), the result converted
+ *    back to RGBA when that was asked for. Kdenlive's track compositing asks
+ *    for YUV 4:2:2 when it may pass the track's image on unchanged.
+ * Wipes only run on the GPU for progressive frames. The other cases
+ * (interlaced or inverted wipes, luma maps from video clips, other formats
+ * than RGBA and YUV 4:2:2) stay on the CPU.
  */
 
 #include "bridge.h"
@@ -31,7 +34,7 @@ namespace gpufx {
 
 namespace {
 
-enum class LumaMode { DissolveRgba, DissolveYuv, Wipe };
+enum class LumaMode { DissolveRgba, WipeRgba, Yuv };
 
 class LumaJob final : public TransitionJob
 {
@@ -48,9 +51,16 @@ public:
     gpufx_u32 fixedPosition = 0;
     gpufx_u32 fixedSoftness = 0;
     bool addAlpha = false;
-    // YUV dissolves: the colorspaces both images are converted to
+    // YUV paths: the blend (mode of gpufx_luma_yuyv), whether the result goes
+    // back to RGBA for the caller, and the colorspaces both images are
+    // converted to
+    int yuvMode = 0;
+    bool backToRgba = false;
     int bottomColorspace = 0;
     int topColorspace = 0;
+    // The size the caller asked for
+    int requestWidth = 0;
+    int requestHeight = 0;
 
     void beforeFetch(mlt_frame aFrame, mlt_frame bFrame) override
     {
@@ -72,7 +82,11 @@ public:
         }
         m_width = bottomWidth;
         m_height = bottomHeight;
-        return mode != LumaMode::DissolveYuv || !(m_width & 1);
+        if (mode != LumaMode::Yuv) {
+            return true;
+        }
+        // The YUV wipe steps through the luma map by the size asked for
+        return !(m_width & 1) && (yuvMode != 2 || (m_width == requestWidth && m_height == requestHeight));
     }
 
     CUresult run(GpuScope &scope, CUdeviceptr top, CUdeviceptr bottom, CUdeviceptr out) override
@@ -80,54 +94,81 @@ public:
         switch (mode) {
         case LumaMode::DissolveRgba:
             return scope.launch1D(KernelId::gpufx_luma_dissolve_rgba, m_width * m_height, top, bottom, out, m_width * m_height, weight);
-        case LumaMode::DissolveYuv:
-            return runDissolveYuv(scope, top, bottom, out);
-        case LumaMode::Wipe:
+        case LumaMode::WipeRgba:
             return runWipe(scope, top, bottom, out);
+        case LumaMode::Yuv:
+            return runYuv(scope, top, bottom, out);
         }
         return CUDA_ERROR_INVALID_VALUE;
     }
 
     void finishFrame(mlt_frame aFrame) override
     {
-        if (mode == LumaMode::DissolveYuv) {
-            // The frame properties set by the conversion back to RGBA
-            mlt_properties_set_int(MLT_FRAME_PROPERTIES(aFrame), "colorspace", mlt_colorspace_rgb);
-            mlt_properties_set_int(MLT_FRAME_PROPERTIES(aFrame), "full_range", 1);
+        if (mode == LumaMode::Yuv) {
+            // The frame properties set by the conversion of the bottom image
+            // to YUV, then back to RGBA for an RGBA result
+            mlt_properties_set_int(MLT_FRAME_PROPERTIES(aFrame), "colorspace", backToRgba ? int(mlt_colorspace_rgb) : bottomColorspace);
+            mlt_properties_set_int(MLT_FRAME_PROPERTIES(aFrame), "full_range", backToRgba ? 1 : 0);
         }
     }
 
 private:
-    CUresult runDissolveYuv(GpuScope &scope, CUdeviceptr top, CUdeviceptr bottom, CUdeviceptr out)
+    CUresult runYuv(GpuScope &scope, CUdeviceptr top, CUdeviceptr bottom, CUdeviceptr out)
     {
         const size_t pixels = size_t(m_width) * size_t(m_height);
+        const int count = m_width * m_height;
         std::vector<int> columns;
-        sws::chroma422Columns(m_width, columns);
+        if (backToRgba) {
+            sws::chroma422Columns(m_width, columns);
+        }
+        // One buffer: the column table, the translucency flag, the luma map
+        // and, when converted back to RGBA, the YUYV image and its alpha plane
         const size_t tableBytes = columns.size() * sizeof(int);
-        const size_t yuvOffset = (tableBytes + 255) & ~size_t(255);
-        const size_t alphaOffset = yuvOffset + ((pixels * 2 + 255) & ~size_t(255));
+        const size_t flagOffset = (tableBytes + 255) & ~size_t(255);
+        const size_t mapOffset = flagOffset + 256;
+        const size_t mapBytes = map.size() * sizeof(uint16_t);
+        const size_t yuvOffset = mapOffset + ((mapBytes + 255) & ~size_t(255));
+        const size_t alphaOffset = yuvOffset + yuv422AlphaOffset(m_width, m_height);
         const sws::RgbToYuv a = sws::rgbToYuv(sws::colorspaceTable(bottomColorspace));
         const sws::RgbToYuv b = sws::rgbToYuv(sws::colorspaceTable(topColorspace));
-        // Converted back from the bottom image's YUV, limited range
-        const sws::YuvToRgb back = sws::yuvToRgb(sws::colorspaceTable(bottomColorspace), false);
         // composite_line_yuv() blends lines of 8 pixels or more with SSE2,
         // except for the last width % 8 pixels
         const int sseWidth = m_width > 7 ? m_width - m_width % 8 : 0;
         const int fixedWeight = int(weight * (1 << 16));
+        const int xDiff = (mapWidth << 16) / m_width;
+        const int yDiff = (mapHeight << 16) / m_height;
 
         DeviceBuffer work;
-        CUresult res = work.allocate(alphaOffset + pixels);
-        if (res == CUDA_SUCCESS) {
+        CUresult res = work.allocate(backToRgba ? alphaOffset + pixels : yuvOffset);
+        if (res == CUDA_SUCCESS && tableBytes) {
             res = scope.upload(work.ptr(), columns.data(), tableBytes);
         }
-        if (res == CUDA_SUCCESS) {
-            res = scope.launch2D(KernelId::gpufx_luma_dissolve_yuyv, m_width / 2, m_height, 32, 8, top, bottom, work.ptr() + yuvOffset,
-                                 work.ptr() + alphaOffset, m_width, m_height, fixedWeight, sseWidth, a.ry, a.gy, a.by, a.ru, a.gu, a.bu, a.rv, a.gv, a.bv, b.ry,
-                                 b.gy, b.by, b.ru, b.gu, b.bu, b.rv, b.gv, b.bv);
+        if (res == CUDA_SUCCESS && mapBytes) {
+            res = scope.upload(work.ptr() + mapOffset, map.data(), mapBytes);
         }
+        // Whether either image has transparency (is_opaque() of both alpha planes)
         if (res == CUDA_SUCCESS) {
-            res = scope.launch2D(KernelId::gpufx_yuyv422_to_rgba, m_width, m_height, 32, 8, work.ptr() + yuvOffset, work.ptr(), bottom,
-                                 work.ptr() + alphaOffset, out, m_width, m_height, back.yOffset, back.yCoeff, back.v2r, back.v2g, back.u2g, back.u2b);
+            res = scope.fill(work.ptr() + flagOffset, 0, sizeof(int));
+        }
+        if (res == CUDA_SUCCESS && yuvMode != 0) {
+            res = scope.launch1D(KernelId::gpufx_alpha_check, count, top, count, work.ptr() + flagOffset);
+        }
+        if (res == CUDA_SUCCESS && yuvMode != 0) {
+            res = scope.launch1D(KernelId::gpufx_alpha_check, count, bottom, count, work.ptr() + flagOffset);
+        }
+        const CUdeviceptr yuv = backToRgba ? work.ptr() + yuvOffset : out;
+        const CUdeviceptr alpha = backToRgba ? work.ptr() + alphaOffset : out + yuv422AlphaOffset(m_width, m_height);
+        if (res == CUDA_SUCCESS) {
+            res = scope.launch2D(KernelId::gpufx_luma_yuyv, m_width / 2, m_height, 32, 8, top, bottom, yuv, alpha, m_width, m_height, yuvMode, fixedWeight,
+                                 weight, sseWidth, work.ptr() + flagOffset, work.ptr() + mapOffset, mapWidth, xDiff, yDiff, position, softness, fixedPosition,
+                                 fixedSoftness, addAlpha ? 1 : 0, a.ry, a.gy, a.by, a.ru, a.gu, a.bu, a.rv, a.gv, a.bv, b.ry, b.gy, b.by, b.ru, b.gu, b.bu,
+                                 b.rv, b.gv, b.bv);
+        }
+        if (res == CUDA_SUCCESS && backToRgba) {
+            // Converted back from the bottom image's YUV, limited range
+            const sws::YuvToRgb back = sws::yuvToRgb(sws::colorspaceTable(bottomColorspace), false);
+            res = scope.launch2D(KernelId::gpufx_yuyv422_to_rgba, m_width, m_height, 32, 8, yuv, work.ptr(), bottom, alpha, out, m_width, m_height,
+                                 back.yOffset, back.yCoeff, back.v2r, back.v2g, back.u2g, back.u2b);
         }
         return res;
     }
@@ -176,8 +217,10 @@ int yuvColorspace(mlt_frame frame)
 /** Follows transition_get_image() up to the compositing */
 TransitionPlan planLuma(const TransitionContext &ctx)
 {
-    // The CPU transition dissolves other formats in YUV
-    if (ctx.format != mlt_image_rgba) {
+    // The CPU transition blends RGBA in RGBA or in YUV 4:2:2, other formats
+    // in YUV 4:2:2 before converting them
+    const bool rgba = ctx.format == mlt_image_rgba;
+    if (!rgba && ctx.format != mlt_image_yuv422) {
         return TransitionPlan::cpu();
     }
     mlt_properties properties = ctx.properties;
@@ -251,7 +294,8 @@ TransitionPlan planLuma(const TransitionContext &ctx)
         if (!alphaOver && version >= 0x072900 && version < 0x072a00) {
             return TransitionPlan::cpu();
         }
-        job->mode = LumaMode::Wipe;
+        job->mode = rgba ? LumaMode::WipeRgba : LumaMode::Yuv;
+        job->yuvMode = 2;
         job->mapWidth = mapWidth;
         job->mapHeight = mapHeight;
         job->position = position;
@@ -270,31 +314,38 @@ TransitionPlan planLuma(const TransitionContext &ctx)
         }
         mix = (reverse || invert) ? 1 - mix : mix;
         job->weight = mix;
-        if (alphaOver) {
+        if (rgba && alphaOver) {
             job->mode = LumaMode::DissolveRgba;
         } else {
-            // Both images are taken in RGBA and converted to YUV by
-            // avcolour_space when fix_background_alpha is set, the result is
-            // converted back to RGBA for the caller
-            if (!mlt_properties_get_int(properties, "fix_background_alpha") || !(mix >= 0.0f && mix <= 1.0f)) {
+            if (!(mix >= 0.0f && mix <= 1.0f)) {
                 return TransitionPlan::cpu();
             }
-            if (!convertsWithAvcolourSpace(ctx.aFrame) || !convertsWithAvcolourSpace(ctx.bFrame) ||
-                mlt_image_full_range(mlt_properties_get(aProperties, "consumer.color_range")) ||
-                mlt_image_full_range(mlt_properties_get(bProperties, "consumer.color_range"))) {
-                return TransitionPlan::cpu();
-            }
-            job->mode = LumaMode::DissolveYuv;
-            job->bottomColorspace = yuvColorspace(ctx.aFrame);
-            job->topColorspace = yuvColorspace(ctx.bFrame);
+            job->mode = LumaMode::Yuv;
+            job->yuvMode = alphaOver ? 1 : 0;
+            // An RGBA result is converted back from YUV for the caller
+            job->backToRgba = rgba;
         }
+    }
+    if (job->mode == LumaMode::Yuv) {
+        // Both images are taken in RGBA and converted to YUV by avcolour_space
+        // when fix_background_alpha is set
+        if (!mlt_properties_get_int(properties, "fix_background_alpha") || !convertsWithAvcolourSpace(ctx.aFrame) ||
+            !convertsWithAvcolourSpace(ctx.bFrame) || mlt_image_full_range(mlt_properties_get(aProperties, "consumer.color_range")) ||
+            mlt_image_full_range(mlt_properties_get(bProperties, "consumer.color_range"))) {
+            return TransitionPlan::cpu();
+        }
+        job->bottomColorspace = yuvColorspace(ctx.aFrame);
+        job->topColorspace = yuvColorspace(ctx.bFrame);
+        job->resultFormat = job->backToRgba ? mlt_image_rgba : mlt_image_yuv422;
     }
     // Copying both images to the GPU and the result back costs about as much
     // as blending them in RGBA on the CPU: those only run on the GPU when an
-    // image is there anyway. The YUV dissolve also saves three conversions.
-    if (job->mode != LumaMode::DissolveYuv && !ctx.topOnGpu && !ctx.bottomOnGpu && !ctx.callerOnGpu) {
+    // image is there anyway. The YUV paths also save the conversions.
+    if (job->mode != LumaMode::Yuv && !ctx.topOnGpu && !ctx.bottomOnGpu && !ctx.callerOnGpu) {
         return TransitionPlan::cpu();
     }
+    job->requestWidth = ctx.width;
+    job->requestHeight = ctx.height;
     job->topFormat = mlt_image_rgba;
     job->topWidth = ctx.width;
     job->topHeight = ctx.height;

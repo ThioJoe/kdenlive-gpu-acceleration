@@ -163,15 +163,25 @@ public:
                             mlt_image_format *format, int *width, int *height) = 0;
     /** The bottom image is fetched with this writable flag. */
     int bottomWritable = 0;
+    /** The format of the result: RGBA, or YUV 4:2:2 (mlt_image_yuv422), which
+     *  run() writes to out as YUYV followed by the alpha plane of the result
+     *  at yuv422AlphaOffset(). */
+    mlt_image_format resultFormat = mlt_image_rgba;
     /** Called once both images are fetched (the top one in RGBA). Returning
      *  false leaves the frame to the CPU transition. */
     virtual bool prepare(int topWidth, int topHeight, int bottomWidth, int bottomHeight) = 0;
     /** Draws top onto bottom into out (bottom size). */
     virtual CUresult run(GpuScope &scope, CUdeviceptr top, CUdeviceptr bottom, CUdeviceptr out) = 0;
-    /** Called when the RGBA result of run() is delivered, for the frame
+    /** Called when the result of run() is delivered, for the frame
      *  properties the CPU transition sets. */
     virtual void finishFrame(mlt_frame aFrame) { (void)aFrame; }
 };
+
+/** Where the alpha plane follows a YUYV image of this size in GPU memory */
+inline size_t yuv422AlphaOffset(int width, int height)
+{
+    return (size_t(width) * size_t(height) * 2 + 255) & ~size_t(255);
+}
 
 struct TransitionPlan
 {
