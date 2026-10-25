@@ -10,10 +10,11 @@ with CUDA. It does not add new effects: projects keep using the regular
 effects and parameters, and render the same with or without the module, with
 or without an NVIDIA GPU.
 
-Kdenlive itself is not modified. It's just 2 `.dll` files that are added within the Kdenlive program directory, and is loaded automatically.
+Kdenlive itself is not modified. It's just 2 `.dll` files (`.so` files on Linux) that are added within the Kdenlive program directory, and is loaded automatically.
 
 The module is one library that goes into
-MLT's module folder of an installed Kdenlive (`lib\mlt` on Windows), and it
+MLT's module folder of an installed Kdenlive (`lib\mlt` on Windows,
+`usr/lib/mlt-7` in the Linux AppImage), and it
 is used by every process that loads MLT from there: Kdenlive itself (monitors,
 timeline preview) and the render processes. A second library adds a page to
 Kdenlive's settings dialog for it (see [Settings](#settings)).
@@ -35,6 +36,45 @@ release for your Kdenlive version and copy both files, given the Kdenlive folder
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Tools\Install-Gpufx.ps1 "C:\path\to\kdenlive-26.08.1_standalone"
 ```
+
+## Installing on Linux
+
+The module is built for Kdenlive's Linux AppImage. An AppImage cannot be
+changed, so the module goes into an extracted copy of it, in a folder of the
+user's: no root is needed.
+
+[Tools/install-gpufx.sh](Tools/install-gpufx.sh) does it all. Given the
+AppImage, it extracts it into a folder next to it (`kdenlive-26.08.2` for
+`kdenlive-26.08.2-x86_64.AppImage`), downloads the latest release for that
+Kdenlive version and adds both files. Kdenlive is then started with the
+`AppRun` file of that folder.
+
+```
+bash Tools/install-gpufx.sh ~/Applications/kdenlive-26.08.2-x86_64.AppImage
+```
+
+It also takes the folder of an AppImage extracted before. `--dest` chooses
+the folder to extract to, `--package` installs a zip downloaded from the
+workflow's artifacts instead of a release, and `--help` lists the other
+options. It never asks anything: on an error it exits with 1 and prints the
+reason.
+
+By hand: the [Linux workflow](.github/workflows/linux.yml) uploads
+`gpufx-kdenlive-<version>-linux`, which holds a `usr` folder. Extract the
+AppImage with `./kdenlive-<version>-x86_64.AppImage --appimage-extract`
+(which creates a `squashfs-root` folder, to rename as you like), copy the
+package's `usr` folder into it, and start Kdenlive with its `AppRun`. It adds
+`usr/lib/mlt-7/libmltgpufx.so` and `usr/lib/mlt-7/gpufx/gpufx-settings.so`.
+To uninstall, delete `libmltgpufx.so` and the `gpufx` folder.
+
+The programs of the extracted folder also work when started directly, such
+as `usr/bin/melt` for renders from the command line: MLT loads its modules,
+gpufx included, from the folder next to the program.
+
+The packages of Linux distributions and the Flatpak are not covered. With
+Kdenlive from a distribution, the module can be built from source against
+the distribution's MLT (see [Building](#building)), and installing it into
+MLT's module folder needs root.
 
 ## Accelerated effects
 
@@ -151,7 +191,9 @@ differently from older versions, so a full range output (a consumer with
 * An NVIDIA GPU of the Maxwell generation or newer (compute capability 5.0)
 * The NVIDIA driver. Nothing else: the CUDA toolkit is not needed to build or
   to run the module. The driver compiles the kernels for the installed GPU
-  the first time they are used and caches the result.
+  the first time they are used and caches the result. On Linux, the module
+  uses the driver's `libcuda.so.1`, which NVIDIA's driver installs (with
+  either of its kernel modules); the nouveau driver has no CUDA.
 
 Without an NVIDIA driver the module does nothing and every effect runs on the
 CPU as usual.
@@ -163,8 +205,8 @@ page. It shows the GPU the module uses, turns GPU processing on or off, and
 keeps chosen effects, compositing or conversions on the CPU. Changes apply to
 the monitor right away and to renders started afterwards.
 
-The page is a library of its own, `gpufx/gpufx-settings.dll` next to the
-module, because it needs Qt and KDE Frameworks while the module only needs
+The page is a library of its own, `gpufx/gpufx-settings.dll` (or `.so`) next
+to the module, because it needs Qt and KDE Frameworks while the module only needs
 MLT. The module loads it only in Kdenlive's main program, which has those
 libraries loaded already: render processes and other programs using MLT never
 load it, and MLT does not look into the `gpufx` folder. When Kdenlive's
@@ -173,7 +215,8 @@ settings dialog (a `KConfigDialog`) opens, the page adds itself with
 Apply, Cancel and Defaults buttons handle it like Kdenlive's own pages.
 
 The settings are saved in Kdenlive's settings file (`kdenliverc` in
-`%LOCALAPPDATA%` on Windows, in `~/.config` elsewhere), in a `[gpufx]` group:
+`%LOCALAPPDATA%` on Windows, in `~/.config` elsewhere, where the AppImage
+names it `kdenlive-appimagerc`), in a `[gpufx]` group:
 
 | Entry                       | Effect |
 |-----------------------------|--------|
@@ -191,7 +234,7 @@ The module also reads these environment variables:
 | Variable                  | Effect |
 |---------------------------|--------|
 | `MLT_GPUFX=0`             | Do not touch any filter, and no settings page |
-| `GPUFX_CONFIG_FILE`       | The settings file to read instead of `kdenliverc`. The settings page sets it to Kdenlive's actual settings file (`kdenlive-appimagerc` for the AppImage, for example), and the processes Kdenlive starts inherit it |
+| `GPUFX_CONFIG_FILE`       | The settings file to read instead of Kdenlive's. The settings page sets it to Kdenlive's actual settings file, and the processes Kdenlive starts inherit it. Without it, the module looks for `kdenliverc`, or on Linux for the name Kdenlive's packages use (`kdenlive-appimagerc` with `PACKAGE_TYPE=appimage`, or when the module is in an extracted AppImage) |
 | `GPUFX_SETTINGS_PAGE=0`   | Do not load the settings page (`1` loads it in any program, for tests) |
 | `MLT_GPUFX_DISABLE`       | Comma separated MLT services to keep on the CPU, e.g. `dropshadow,box_blur`. `avformat` and `avcolor_space` stand for the two image conversions |
 | `MLT_GPUFX_DEBUG=1`       | Log every frame processed on the GPU (MLT info log level) |
@@ -242,6 +285,18 @@ page and takes a screenshot. It uploads both libraries in a
 the screenshots of the settings page. Run it by hand (*Actions > Run
 workflow*) to build for another Kdenlive version.
 
+The Linux workflow does the same for Kdenlive's AppImage. It builds the
+module in AlmaLinux 9 with GCC 14 from gcc-toolset, as Kdenlive's AppImage is
+built, against the AppImage's `libmlt-7.so`, and checks that it needs no newer
+glibc or libstdc++ than the AppImage's own files, so that it runs wherever the
+AppImage does. The settings page needs KDE Frameworks, which AlmaLinux 9 lacks:
+it is built in Debian 13, whose Qt and KDE Frameworks are older than the
+AppImage's, under the same check, and the workflow checks that every function
+it uses is in the AppImage's libraries. The tests run inside the extracted
+AppImage, Kdenlive opens the page on a virtual screen, and
+`Tools/install-gpufx.sh` installs the package into the AppImage. It uploads
+both libraries in a `usr` folder that merges into an extracted AppImage.
+
 The CUDA kernels in `kernels/gpufx_kernels.cu` are shipped compiled to PTX in
 `kernels/gpufx_kernels.ptx`, so that no CUDA toolkit is needed. After changing
 the kernels, regenerate the PTX with nvcc:
@@ -264,8 +319,9 @@ fallbacks on errors, the behaviour without a GPU, and the settings file.
 `tests/gpufx_settings_test` opens a settings dialog made like Kdenlive's,
 checks that the module loads the page and that the page adds itself, then
 applies changes and checks the settings file and the module. Run from the
-`bin` folder of Kdenlive's Windows build, it uses Kdenlive's Qt and KDE
-Frameworks; given a file name, it saves a screenshot of the page.
+`bin` folder of Kdenlive's Windows build (or `usr/bin` of the extracted
+AppImage, with `LD_LIBRARY_PATH` set to its `usr/lib`), it uses Kdenlive's Qt
+and KDE Frameworks; given a file name, it saves a screenshot of the page.
 
 By default the tests run against `mockcuda`, an emulated CUDA driver built
 with the tests: it executes the same kernel source compiled as C++ on the CPU,

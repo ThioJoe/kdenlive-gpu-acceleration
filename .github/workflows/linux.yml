@@ -224,6 +224,15 @@ jobs:
           cp build/libmltgpufx.so "$root/usr/lib/mlt-7/"
           mkdir -p "$root/usr/lib/mlt-7/gpufx"
           cp build-page/gpufx/gpufx-settings.so "$root/usr/lib/mlt-7/gpufx/"
+          # The programs of the extracted AppImage load the module when started
+          # without the AppRun's environment too, like melt for renders from
+          # the command line
+          env -i HOME="$HOME" PATH=/usr/bin:/bin "$root/usr/bin/melt" -query filters > melt-filters.txt 2>&1 || true
+          if ! grep -qE '^ *- gpufx$' melt-filters.txt; then
+            echo "::error::The AppImage's melt does not load the module when started directly"
+            cat melt-filters.txt
+            exit 1
+          fi
           # From usr/bin, with the environment Kdenlive's AppRun sets, MLT
           # finds its modules, data and frei0r plugins as it does for Kdenlive,
           # and Qt finds Kdenlive's plugins and data. The tests find Kdenlive's
@@ -300,6 +309,19 @@ jobs:
         with:
           name: gpufx-kdenlive-${{ env.KDENLIVE_VERSION }}-linux
           path: dist/
+          if-no-files-found: error
+
+      # The tests, to run them on a real GPU: copied to usr/bin of the
+      # extracted AppImage, with LD_LIBRARY_PATH set to its usr/lib, and
+      # GPUFX_CUDA_LIBRARY=libcuda.so.1 (see README.md)
+      - name: Upload the tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpufx-tests-kdenlive-${{ env.KDENLIVE_VERSION }}-linux
+          path: |
+            build/tests/gpufx_test
+            build/tests/libgpufx_mockcuda.so
+            build-page/tests/gpufx_settings_test
           if-no-files-found: error
 
       # The page in Kdenlive itself, on a virtual screen: a variant of the
