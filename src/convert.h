@@ -6,6 +6,7 @@
 #pragma once
 
 #include "gpu_runtime.h"
+#include "sws_port.h"
 
 #include <cstdint>
 
@@ -56,5 +57,17 @@ CUresult convertRgbaToYuv422(GpuScope &scope, CUdeviceptr rgba, int width, int h
  *  must be even. Does not synchronize the stream. */
 CUresult convertRgbaThroughYuv422(GpuScope &scope, CUdeviceptr rgba, int width, int height, int colorspace, int backColorspace, bool backFullRange,
                                   DeviceBuffer &out);
+
+/** Scales an RGBA image on the GPU as MLT's rescale filter does with its
+ *  swscale scaler (sws_scale_frame() with SWS_FULL_CHR_H_INP |
+ *  SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND), through YUV: converted with the
+ *  coefficients of dstColorspace and back with those of srcColorspace
+ *  (mlt_colorspace values, as mlt_set_luma_transfer() sets them). Luma and
+ *  alpha are scaled with lumaMethod, chroma with chromaMethod. out receives
+ *  dstWidth x dstHeight RGBA pixels. Returns CUDA_ERROR_NOT_SUPPORTED, doing
+ *  nothing, for the scalings libswscale does in two passes or differently
+ *  between versions. Does not synchronize the stream. */
+CUresult scaleRgba(GpuScope &scope, CUdeviceptr rgba, int width, int height, int dstWidth, int dstHeight, sws::ScaleMethod lumaMethod,
+                   sws::ScaleMethod chromaMethod, int srcColorspace, int dstColorspace, DeviceBuffer &out);
 
 } // namespace gpufx

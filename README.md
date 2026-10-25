@@ -96,6 +96,7 @@ MLT's module folder needs root.
 | Track compositing                   | `qtblend` transition | Matches the CPU transition: same alpha, colors within one level, see below |
 | Video decoding to RGBA              | `avformat` producer  | Identical output, 8-bit 4:2:0 video, see below |
 | Output conversion to YUV            | `avcolor_space`      | Identical output, see below |
+| Clip size and field order           | MLT's normalizing filters | Identical output, see below |
 
 Any mix of accelerated and CPU-only effects works: each accelerated effect is
 moved to the GPU for its own processing, and the others stay on the CPU.
@@ -189,14 +190,25 @@ back to YUV.
   RGBA. An image converted from RGBA always has one. When the top track's
   last effect ran on the GPU, the image is converted to YUV and back there,
   with the same arithmetic, and stays on the GPU.
+* **Clip size and field order**: MLT puts normalizing filters between each
+  clip's producer and its effects (`color_transform`, `fieldorder`, `crop`,
+  `rescale` and `resize`). As CPU filters, they needed every decoded frame in
+  memory, only for it to go back to the GPU for the clip's effects or the
+  compositing. gpufx wraps them: when they leave the image as it is, the most
+  common case, it stays on the GPU. Scaling (`rescale`, with libswscale's
+  nearest, bilinear, bicubic and Lanczos methods, the ones Kdenlive offers)
+  and padding to the profile's aspect ratio (`resize`) run on the GPU.
+  Changing the field order, cropping and the other scaling methods stay on
+  the CPU.
 
-Both conversions reproduce libswscale with the flags MLT uses: the
+The conversions and the scaling reproduce libswscale with the flags MLT uses: the
 coefficients, chroma sampling positions and rounding are ported in
 `src/sws_port.cpp`, and the output is identical for every colorspace MLT
 handles (BT.601, BT.709, BT.2020, SMPTE 240M), limited and full range video,
 and MLT's field by field conversion of interlaced video. This was checked
 against libswscale of FFmpeg 6.1, 7.1 and 8.0, with and without its SIMD
-code. One exception: FFmpeg 8.0 rounds the conversion to full range YUV
+code (the scaling against 7.1 and 8.0 with their SIMD code, after comparing
+the code it uses in 6.1, 7.1 and 8.0). One exception: FFmpeg 8.0 rounds the conversion to full range YUV
 differently from older versions, so a full range output (a consumer with
 `color_range=full`, not Kdenlive's default) keeps the CPU conversion.
 
@@ -237,7 +249,7 @@ names it `kdenlive-appimagerc`), in a `[gpufx]` group:
 | `enabled=false`             | GPU processing off |
 | `effect:<service>=false`    | Keep the effect with this MLT service on the CPU, e.g. `effect:dropshadow` |
 | `transition:qtblend=false`  | Keep track compositing on the CPU |
-| `conversion:avformat=false` | Keep the decoding of video to RGBA on the CPU (`conversion:avcolor_space` for the output conversion to YUV) |
+| `conversion:avformat=false` | Keep the decoding of video to RGBA on the CPU (`conversion:avcolor_space` for the output conversion to YUV, `conversion:normalize` for MLT's normalizing filters) |
 
 Every process using the module reads them when it starts, and Kdenlive again
 when the settings are applied. With GPU processing off, render processes
@@ -250,7 +262,7 @@ The module also reads these environment variables:
 | `MLT_GPUFX=0`             | Do not touch any filter, and no settings page |
 | `GPUFX_CONFIG_FILE`       | The settings file to read instead of Kdenlive's. The settings page sets it to Kdenlive's actual settings file, and the processes Kdenlive starts inherit it. Without it, the module looks for `kdenliverc`, or on Linux for the name Kdenlive's packages use (`kdenlive-appimagerc` with `PACKAGE_TYPE=appimage`, or when the module is in an extracted AppImage) |
 | `GPUFX_SETTINGS_PAGE=0`   | Do not load the settings page (`1` loads it in any program, for tests) |
-| `MLT_GPUFX_DISABLE`       | Comma separated MLT services to keep on the CPU, e.g. `dropshadow,box_blur`. `avformat` and `avcolor_space` stand for the two image conversions |
+| `MLT_GPUFX_DISABLE`       | Comma separated MLT services to keep on the CPU, e.g. `dropshadow,box_blur`. `avformat` and `avcolor_space` stand for the two image conversions, `normalize` for MLT's normalizing filters |
 | `MLT_GPUFX_DEBUG=1`       | Log every frame processed on the GPU (MLT info log level) |
 | `MLT_GPUFX_QTBLEND=force` | Accelerate Transform with MLT versions newer than the module knows |
 | `GPUFX_CUDA_DEVICE=n`     | Use the n-th CUDA device (default 0) |
@@ -381,8 +393,9 @@ of the time there). Every frame was identical to the CPU render.
 * `src/effect_*.cpp` read the parameters of each effect, exactly like the CPU
   filter does, and launch the kernels. `src/qt_raster.cpp` holds the parts of
   Qt's paint engine needed to draw like QPainter.
-* `src/convert.cpp` runs the image conversions, with the libswscale setup
-  ported in `src/sws_port.cpp`.
+* `src/convert.cpp` runs the image conversions and the scaling, with the
+  libswscale setup ported in `src/sws_port.cpp`. `src/normalizers.cpp` holds
+  what MLT's normalizing filters do to a frame.
 * `kernels/gpufx_kernels.cu` contains the kernels. They reproduce the integer
   arithmetic of the CPU code (for the drop shadow, Qt's blur, scaling and
   compositing), which is why the output matches.

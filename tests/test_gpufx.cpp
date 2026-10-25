@@ -1215,18 +1215,33 @@ void testNormalizers(mlt_profile profile)
         Properties frame;
         // The decoded image goes into the effect on the GPU
         bool staysOnGpu;
+        // A profile colorspace other than that of the video
+        bool otherColorspace;
+        // The profile's height when not 0
+        int profileHeight;
     };
     const Case cases[] = {
-        {"same size", 160, 90, "Ip", {}, true},
+        {"same size", 160, 90, "Ip", {}, true, false, 0},
         // resize pads the narrower image on the GPU
-        {"pillarbox", 120, 90, "Ip", {}, true},
-        {"letterbox", 160, 72, "Ip", {}, true},
-        // rescale scales with swscale on the CPU
-        {"scaled", 320, 180, "Ip", {}, false},
-        // fieldorder shifts the image by a line on the CPU
-        {"field order", 160, 90, "It", {{"consumer.top_field_first", "0"}}, false},
+        {"pillarbox", 120, 90, "Ip", {}, true, false, 0},
+        {"letterbox", 160, 72, "Ip", {}, true, false, 0},
+        // rescale scales with the arithmetic of libswscale on the GPU
+        {"scaled", 320, 180, "Ip", {}, true, false, 0},
+        {"scaled, nearest", 96, 54, "Ip", {{"consumer.rescale", "nearest"}}, true, false, 0},
+        {"scaled, bilinear", 96, 54, "Ip", {{"consumer.rescale", "bilinear"}}, true, false, 0},
+        {"scaled, bicubic", 250, 140, "Ip", {{"consumer.rescale", "bicubic"}}, true, false, 0},
+        {"scaled, Lanczos", 320, 180, "Ip", {{"consumer.rescale", "hyper"}}, true, false, 0},
+        {"scaled, other colorspace", 320, 180, "Ip", {{"consumer.rescale", "bicubic"}}, true, true, 0},
+        // fieldorder shifts the image by a line on the CPU. The height is a
+        // multiple of 4: MLT's CPU decoding of the fields of an interlaced
+        // 4:2:0 frame reads past the chroma otherwise.
+        {"field order", 160, 88, "It", {{"consumer.top_field_first", "0"}}, false, false, 88},
     };
+    const int profileColorspace = profile->colorspace;
+    const int profileHeight = profile->height;
     for (const Case &c : cases) {
+        profile->colorspace = c.otherColorspace ? (profileColorspace == 709 ? 601 : 709) : profileColorspace;
+        profile->height = c.profileHeight ? c.profileHeight : profileHeight;
         const std::string path = tempPath(std::string("gpufx_normalize_") + std::to_string(c.width) + "x" + std::to_string(c.height) + ".y4m");
         if (!writeY4m(path, c.width, c.height, 1, c.parameters)) {
             check(false, "normalizers: cannot write %s", path.c_str());
@@ -1240,14 +1255,17 @@ void testNormalizers(mlt_profile profile)
         expectSameOutput(cpu, gpu, what);
         check(gpu.width == profile->width && gpu.height == profile->height, "%s: %dx%d", what.c_str(), gpu.width, gpu.height);
         if (g_mock.active() && c.staysOnGpu) {
+            // The frame, and the filters of a scaling
             const uint64_t yuvBytes = uint64_t(c.width) * uint64_t(c.height) * 3 / 2;
-            check(stats.downloads == 1 && stats.uploadedBytes < yuvBytes + 16384, "%s: %llu downloads, %llu bytes uploaded", what.c_str(),
+            check(stats.downloads == 1 && stats.uploadedBytes < yuvBytes + 32768, "%s: %llu downloads, %llu bytes uploaded", what.c_str(),
                   (unsigned long long)stats.downloads, (unsigned long long)stats.uploadedBytes);
         }
         // Without effects, nothing changes
         expectSameOutput(decodeChain(profile, path, true, {}, c.frame), decodeChain(profile, path, false, {}, c.frame), what + " without effects");
         remove(path.c_str());
     }
+    profile->colorspace = profileColorspace;
+    profile->height = profileHeight;
 }
 
 /** Filters on a producer, whose image is requested in format. MLT's

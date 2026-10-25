@@ -38,6 +38,7 @@ constexpr CUresult CUDA_ERROR_OUT_OF_MEMORY = 2;
 constexpr CUresult CUDA_ERROR_NOT_INITIALIZED = 3;
 constexpr CUresult CUDA_ERROR_NO_DEVICE = 100;
 constexpr CUresult CUDA_ERROR_NOT_FOUND = 500;
+constexpr CUresult CUDA_ERROR_NOT_SUPPORTED = 801;
 
 constexpr int CU_JIT_INFO_LOG_BUFFER = 3;
 constexpr int CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES = 4;

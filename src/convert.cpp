@@ -6,6 +6,11 @@
 #include "convert.h"
 #include "sws_port.h"
 
+#include <algorithm>
+#include <cstring>
+#include <deque>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 namespace gpufx {
@@ -120,6 +125,113 @@ CUresult convertRgbaThroughYuv422(GpuScope &scope, CUdeviceptr rgba, int width, 
     if (res == CUDA_SUCCESS) {
         res = scope.launch2D(KernelId::gpufx_yuyv422_to_rgba, width, height, 32, 8, work.ptr() + yuvOffset, work.ptr(), rgba, out.ptr(), width, height,
                              back.yOffset, back.yCoeff, back.v2r, back.v2g, back.u2g, back.u2b);
+    }
+    return res;
+}
+
+namespace {
+
+/** The filters of a scaling, packed for a single upload */
+struct ScaleTables
+{
+    std::vector<uint8_t> data;
+    int sizes[4] = {};
+    size_t coefficients[4] = {};
+    size_t positions[4] = {};
+};
+
+/** The filters of a scaling by scaleRgba(): luma and chroma horizontally,
+ *  then vertically. Null for the scalings that are not ported. The longer
+ *  filters take a while to compute (Lanczos), so the last few are kept. */
+std::shared_ptr<const ScaleTables> scaleTables(int width, int height, int dstWidth, int dstHeight, sws::ScaleMethod lumaMethod,
+                                               sws::ScaleMethod chromaMethod)
+{
+    struct Entry
+    {
+        int key[6];
+        std::shared_ptr<const ScaleTables> tables;
+    };
+    static std::mutex mutex;
+    static std::deque<Entry> cache; // the most recent first
+    const int key[6] = {width, height, dstWidth, dstHeight, int(lumaMethod), int(chromaMethod)};
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (auto it = cache.begin(); it != cache.end(); ++it) {
+            if (std::equal(key, key + 6, it->key)) {
+                const Entry entry = *it;
+                cache.erase(it);
+                cache.push_front(entry);
+                return entry.tables;
+            }
+        }
+    }
+
+    sws::ScaleFilter filters[4];
+    std::shared_ptr<ScaleTables> tables;
+    // A single luma tap with two chroma taps, which yuv2rgb_full_1_c_template()
+    // rounds differently from FFmpeg 8.0 on, is left out
+    if (sws::scaleFilter(lumaMethod, false, width, dstWidth, filters[0]) && sws::scaleFilter(chromaMethod, false, width, dstWidth, filters[1])
+        && sws::scaleFilter(lumaMethod, true, height, dstHeight, filters[2]) && sws::scaleFilter(chromaMethod, true, height, dstHeight, filters[3])
+        && (filters[2].size != 1 || filters[3].size == 1)) {
+        tables = std::make_shared<ScaleTables>();
+        std::vector<uint8_t> &data = tables->data;
+        auto append = [&data](const void *bytes, size_t count) {
+            const size_t offset = data.size();
+            data.resize((offset + count + 255) & ~size_t(255));
+            memcpy(data.data() + offset, bytes, count);
+            return offset;
+        };
+        for (int i = 0; i < 4; ++i) {
+            tables->sizes[i] = filters[i].size;
+            tables->coefficients[i] = append(filters[i].coefficients.data(), filters[i].coefficients.size() * sizeof(int16_t));
+            tables->positions[i] = append(filters[i].positions.data(), filters[i].positions.size() * sizeof(int32_t));
+        }
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    cache.push_front(Entry{{key[0], key[1], key[2], key[3], key[4], key[5]}, tables});
+    if (cache.size() > 8) {
+        cache.pop_back();
+    }
+    return tables;
+}
+
+} // namespace
+
+CUresult scaleRgba(GpuScope &scope, CUdeviceptr rgba, int width, int height, int dstWidth, int dstHeight, sws::ScaleMethod lumaMethod,
+                   sws::ScaleMethod chromaMethod, int srcColorspace, int dstColorspace, DeviceBuffer &out)
+{
+    if (width <= 0 || height <= 0 || dstWidth <= 0 || dstHeight <= 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const std::shared_ptr<const ScaleTables> tables = scaleTables(width, height, dstWidth, dstHeight, lumaMethod, chromaMethod);
+    if (!tables) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    const sws::RgbToYuv to = sws::rgbToYuv(sws::colorspaceTable(dstColorspace));
+    const sws::YuvToRgb back = sws::yuvToRgb(sws::colorspaceTable(srcColorspace), false);
+
+    // One buffer: the filters, then the planes between the two passes
+    const size_t planesOffset = tables->data.size();
+    const size_t planesBytes = size_t(dstWidth) * size_t(height) * 4 * sizeof(int16_t);
+    DeviceBuffer work;
+    CUresult res = work.allocate(planesOffset + planesBytes);
+    if (res == CUDA_SUCCESS) {
+        res = scope.upload(work.ptr(), tables->data.data(), tables->data.size());
+    }
+    const CUdeviceptr planes = work.ptr() + planesOffset;
+    const CUdeviceptr base = work.ptr();
+    if (res == CUDA_SUCCESS) {
+        res = scope.launch2D(KernelId::gpufx_sws_scale_rgba_h, dstWidth, height, 32, 8, rgba, width, height, planes, dstWidth, base + tables->coefficients[0],
+                             base + tables->positions[0], tables->sizes[0], base + tables->coefficients[1], base + tables->positions[1], tables->sizes[1],
+                             to.ry, to.gy, to.by, to.ru, to.gu, to.bu, to.rv, to.gv, to.bv);
+    }
+    if (res == CUDA_SUCCESS) {
+        res = out.allocate(size_t(dstWidth) * size_t(dstHeight) * 4);
+    }
+    if (res == CUDA_SUCCESS) {
+        res = scope.launch2D(KernelId::gpufx_sws_scale_rgba_v, dstWidth, dstHeight, 32, 8, planes, dstWidth, height, out.ptr(), dstHeight,
+                             base + tables->coefficients[2], base + tables->positions[2], tables->sizes[2], base + tables->coefficients[3],
+                             base + tables->positions[3], tables->sizes[3], back.yOffset, back.yCoeff, back.v2r, back.v2g, back.u2g, back.u2b);
     }
     return res;
 }

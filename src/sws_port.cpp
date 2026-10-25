@@ -6,6 +6,8 @@
 
 #include "sws_port.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 
@@ -222,6 +224,224 @@ void chroma422Columns(int width, std::vector<int> &columns)
 {
     // Horizontally the chroma of 4:2:2 is subsampled as that of 4:2:0
     pointSamples((width + 1) >> 1, width, localPosition(1, -513), localPosition(0, -513), columns);
+}
+
+bool scaleFilter(ScaleMethod method, bool vertical, int srcW, int dstW, ScaleFilter &out)
+{
+#if !defined(__x86_64__) && !defined(_M_X64)
+    // libswscale aligns the filters differently on other processors
+    return false;
+#endif
+    // Arguments of sws_init_single_context() on x86 (X86_MMX), without
+    // chroma subsampling: get_local_pos() gives luma and chroma the same
+    // position
+    int filterAlign = vertical ? 2 : 4;
+    const int one = vertical ? 1 << 12 : 1 << 14;
+    const int xInc = int(((int64_t(srcW) << 16) + (dstW >> 1)) / dstW);
+    const int srcPos = localPosition(0, 0);
+    const int dstPos = srcPos;
+    // av_log2()
+    int log2 = 0;
+    for (unsigned v = unsigned(srcW / dstW) >> 1; v; v >>= 1) {
+        ++log2;
+    }
+    const int64_t fone = int64_t(1) << (54 - std::min(log2, 8));
+    constexpr double kMaxReduceCutoff = 0.002; // SWS_MAX_REDUCE_CUTOFF
+
+    std::vector<int32_t> &filterPos = out.positions;
+    filterPos.assign(size_t(dstW), 0);
+    std::vector<int64_t> filter;
+    int filterSize;
+    if (std::abs(xInc - 0x10000) < 10 && srcPos == dstPos) {
+        // unscaled
+        filterSize = 1;
+        filter.assign(size_t(dstW), fone);
+        for (int i = 0; i < dstW; i++) {
+            filterPos[size_t(i)] = i;
+        }
+    } else if (method == ScalePoint) {
+        filterSize = 1;
+        filter.assign(size_t(dstW), fone);
+        int64_t xDstInSrc = ((dstPos * int64_t(xInc)) >> 8) - ((srcPos * 0x8000LL) >> 7);
+        for (int i = 0; i < dstW; i++) {
+            filterPos[size_t(i)] = int((xDstInSrc - ((filterSize - 1) << 15) + (1 << 15)) >> 16);
+            xDstInSrc += xInc;
+        }
+    } else {
+        // size_factor of scale_algorithms[], 6 for Lanczos with the default
+        // parameter
+        const int sizeFactor = method == ScaleBicubic ? 4 : method == ScaleBilinear ? 2 : 6;
+        if (xInc <= 1 << 16) {
+            filterSize = 1 + sizeFactor; // upscale
+        } else {
+            filterSize = 1 + (sizeFactor * srcW + dstW - 1) / dstW;
+        }
+        filterSize = std::min(filterSize, srcW - 2);
+        filterSize = std::max(filterSize, 1);
+
+        filter.assign(size_t(dstW) * size_t(filterSize), 0);
+        int64_t xDstInSrc = ((dstPos * int64_t(xInc)) >> 7) - ((srcPos * 0x10000LL) >> 7);
+        for (int i = 0; i < dstW; i++) {
+            int xx = int((xDstInSrc - (filterSize - 2) * (1LL << 16)) / (1 << 17));
+            filterPos[size_t(i)] = xx;
+            for (int j = 0; j < filterSize; j++) {
+                int64_t d = (std::abs((int64_t(xx) * (1 << 17)) - xDstInSrc)) << 13;
+                if (xInc > 1 << 16) {
+                    d = d * dstW / srcW;
+                }
+                const double floatd = d * (1.0 / (1 << 30));
+                int64_t coeff;
+                if (method == ScaleBicubic) {
+                    // The default parameters B = 0 and C = 0.6
+                    const int64_t B = 0;
+                    const int64_t C = int64_t(0.6 * (1 << 24));
+                    if (d >= 1LL << 31) {
+                        coeff = 0;
+                    } else {
+                        const int64_t dd = (d * d) >> 30;
+                        const int64_t ddd = (dd * d) >> 30;
+                        if (d < 1LL << 30) {
+                            coeff = (12 * (1 << 24) - 9 * B - 6 * C) * ddd + (-18 * (1 << 24) + 12 * B + 6 * C) * dd + (6 * (1 << 24) - 2 * B) * (1 << 30);
+                        } else {
+                            coeff = (-B - 6 * C) * ddd + (6 * B + 30 * C) * dd + (-12 * B - 48 * C) * d + (8 * B + 24 * C) * (1 << 30);
+                        }
+                    }
+                    coeff /= (1LL << 54) / fone;
+                } else if (method == ScaleLanczos) {
+                    const double p = 3.0;
+                    const double pi = 3.14159265358979323846; // M_PI
+                    coeff = int64_t((d ? std::sin(floatd * pi) * std::sin(floatd * pi / p) / (floatd * floatd * pi * pi / p) : 1.0) * fone);
+                    if (floatd > p) {
+                        coeff = 0;
+                    }
+                } else {
+                    coeff = (1 << 30) - d;
+                    if (coeff < 0) {
+                        coeff = 0;
+                    }
+                    coeff *= fone >> 30;
+                }
+                filter[size_t(i) * size_t(filterSize) + size_t(j)] = coeff;
+                xx++;
+            }
+            xDstInSrc += 2LL * xInc;
+        }
+    }
+
+    // Without source and destination filters, filter2 is the filter
+    const int filter2Size = filterSize;
+    std::vector<int64_t> &filter2 = filter;
+
+    // Reduce the filter size, step 1: find the size and shift left
+    int minFilterSize = 0;
+    for (int i = dstW - 1; i >= 0; i--) {
+        int64_t *row = &filter2[size_t(i) * size_t(filter2Size)];
+        int min = filter2Size;
+        int64_t cutOff = 0;
+        // Near zero elements on the left go by shifting left
+        for (int j = 0; j < filter2Size; j++) {
+            cutOff += std::abs(row[0]);
+            if (cutOff > kMaxReduceCutoff * fone) {
+                break;
+            }
+            // Monotonic positions
+            if (i < dstW - 1 && filterPos[size_t(i)] >= filterPos[size_t(i) + 1]) {
+                break;
+            }
+            int k;
+            for (k = 1; k < filter2Size; k++) {
+                row[k - 1] = row[k];
+            }
+            row[k - 1] = 0;
+            filterPos[size_t(i)]++;
+        }
+        cutOff = 0;
+        // Near zeros on the right
+        for (int j = filter2Size - 1; j > 0; j--) {
+            cutOff += std::abs(row[j]);
+            if (cutOff > kMaxReduceCutoff * fone) {
+                break;
+            }
+            min--;
+        }
+        if (min > minFilterSize) {
+            minFilterSize = min;
+        }
+    }
+    // Special case of unscaled vertical filtering with MMX
+    if (minFilterSize == 1 && filterAlign == 2) {
+        filterAlign = 1;
+    }
+    filterSize = (minFilterSize + (filterAlign - 1)) & (~(filterAlign - 1));
+    // MAX_FILTER_SIZE * 16 / APCK_SIZE with SWS_ACCURATE_RND on x86-64
+    if (filterSize >= 256 * 16 / 24) {
+        return false;
+    }
+
+    // Step 2: reduce it
+    std::vector<int64_t> reduced(size_t(dstW) * size_t(filterSize));
+    for (int i = 0; i < dstW; i++) {
+        for (int j = 0; j < filterSize; j++) {
+            reduced[size_t(i) * size_t(filterSize) + size_t(j)] = j >= filter2Size ? 0 : filter2[size_t(i) * size_t(filter2Size) + size_t(j)];
+        }
+    }
+
+    // Fix the borders
+    for (int i = 0; i < dstW; i++) {
+        int64_t *row = &reduced[size_t(i) * size_t(filterSize)];
+        int32_t &pos = filterPos[size_t(i)];
+        if (pos < 0) {
+            // Move the coefficients left to compensate for the position
+            for (int j = 1; j < filterSize; j++) {
+                const int left = std::max(j + pos, 0);
+                row[left] += row[j];
+                row[j] = 0;
+            }
+            pos = 0;
+        }
+        if (pos + filterSize > srcW) {
+            const int shift = pos + std::min(filterSize - srcW, 0);
+            int64_t acc = 0;
+            for (int j = filterSize - 1; j >= 0; j--) {
+                if (pos + j >= srcW) {
+                    acc += row[j];
+                    row[j] = 0;
+                }
+            }
+            for (int j = filterSize - 1; j >= 0; j--) {
+                if (j < shift) {
+                    row[j] = 0;
+                } else {
+                    row[j] = row[j - shift];
+                }
+            }
+            pos -= shift;
+            row[srcW - 1 - pos] += acc;
+        }
+    }
+
+    // Normalize and store
+    out.size = filterSize;
+    out.coefficients.assign(size_t(dstW) * size_t(filterSize), 0);
+    for (int i = 0; i < dstW; i++) {
+        const int64_t *row = &reduced[size_t(i) * size_t(filterSize)];
+        int64_t error = 0;
+        int64_t sum = 0;
+        for (int j = 0; j < filterSize; j++) {
+            sum += row[j];
+        }
+        sum = (sum + one / 2) / one;
+        if (!sum) {
+            sum = 1;
+        }
+        for (int j = 0; j < filterSize; j++) {
+            const int64_t v = row[j] + error;
+            const int intV = int(roundedDiv(v, sum));
+            out.coefficients[size_t(i) * size_t(filterSize) + size_t(j)] = int16_t(intV);
+            error = v - intV * sum;
+        }
+    }
+    return true;
 }
 
 } // namespace sws

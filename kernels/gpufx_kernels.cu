@@ -1155,3 +1155,163 @@ GPUFX_KERNEL void gpufx_pad_rgba(const gpufx_u32 *__restrict__ src, int srcWidth
     const bool inside = sx >= 0 && sx < srcWidth && sy >= 0 && sy < srcHeight;
     dst[size_t(y) * size_t(w) + size_t(x)] = inside ? src[size_t(sy) * size_t(srcWidth) + size_t(sx)] : fill;
 }
+
+/* ==========================================================================
+ * RGBA scaled to RGBA as MLT's rescale filter does it with libswscale (its
+ * swscale scaler: SWS_FULL_CHR_H_INP, SWS_FULL_CHR_H_INT and
+ * SWS_ACCURATE_RND): converted to 15-bit YUV and alpha while scaled
+ * horizontally, then scaled vertically and converted back. The filters come
+ * from gpufx/src/sws_port.cpp (initFilter()); as in libswscale, the taps of a
+ * filter past the last input sample have no weight.
+ * ========================================================================== */
+
+/* rgb32ToY_c() for RGBA: 14-bit luma */
+GPUFX_DEV int gpufx_sws_luma14(gpufx_u32 px, int ry, int gy, int by)
+{
+    const int r = int(px & 0xFFu);
+    const int g = int(px & 0xFF00u);
+    const int b = int((px & 0xFF0000u) >> 16);
+    return int((gpufx_u32((ry << 8) * r + gy * g + (by << 8) * b) + (32u << 22) + (1u << 16)) >> 17);
+}
+
+/* rgb32ToUV_c() for RGBA: 14-bit chroma, U or V */
+GPUFX_DEV int gpufx_sws_chroma14(gpufx_u32 px, int cr, int cg, int cb)
+{
+    const int r = int(px & 0xFFu);
+    const int g = int(px & 0xFF00u);
+    const int b = int((px & 0xFF0000u) >> 16);
+    return int((gpufx_u32(cr * 256 * r + cg * g + cb * 256 * b) + (256u << 22) + (1u << 16)) >> 17);
+}
+
+/* The horizontal pass (rgb32ToY_c(), rgb32ToUV_c(), rgbaToA_c(), then
+ * hScale16To15_c()): planes receives the 15-bit Y, U, V and alpha planes,
+ * dstWidth x srcHeight each. Luma and alpha go through the luma filter,
+ * chroma through the chroma filter. */
+GPUFX_KERNEL void gpufx_sws_scale_rgba_h(const gpufx_u32 *__restrict__ src, int srcWidth, int srcHeight, gpufx_i16 *__restrict__ planes, int dstWidth,
+                                         const gpufx_i16 *__restrict__ lumFilter, const int *__restrict__ lumPos, int lumSize,
+                                         const gpufx_i16 *__restrict__ chrFilter, const int *__restrict__ chrPos, int chrSize, int ry, int gy, int by,
+                                         int ru, int gu, int bu, int rv, int gv, int bv)
+{
+    const int x = GPUFX_GLOBAL_X;
+    const int y = GPUFX_GLOBAL_Y;
+    if (x >= dstWidth || y >= srcHeight) {
+        return;
+    }
+    const gpufx_u32 *line = src + size_t(y) * size_t(srcWidth);
+    int sumY = 0;
+    int sumA = 0;
+    for (int j = 0; j < lumSize; ++j) {
+        const gpufx_u32 px = line[gpufx_min(lumPos[x] + j, srcWidth - 1)];
+        const int c = lumFilter[x * lumSize + j];
+        const int a = int(px >> 24);
+        sumY += gpufx_sws_luma14(px, ry, gy, by) * c;
+        sumA += ((a << 6) | (a >> 2)) * c;
+    }
+    int sumU = 0;
+    int sumV = 0;
+    for (int j = 0; j < chrSize; ++j) {
+        const gpufx_u32 px = line[gpufx_min(chrPos[x] + j, srcWidth - 1)];
+        const int c = chrFilter[x * chrSize + j];
+        sumU += gpufx_sws_chroma14(px, ru, gu, bu) * c;
+        sumV += gpufx_sws_chroma14(px, rv, gv, bv) * c;
+    }
+    const size_t plane = size_t(dstWidth) * size_t(srcHeight);
+    const size_t index = size_t(y) * size_t(dstWidth) + size_t(x);
+    planes[index] = gpufx_i16(gpufx_min(sumY >> 13, (1 << 15) - 1));
+    planes[plane + index] = gpufx_i16(gpufx_min(sumU >> 13, (1 << 15) - 1));
+    planes[2 * plane + index] = gpufx_i16(gpufx_min(sumV >> 13, (1 << 15) - 1));
+    planes[3 * plane + index] = gpufx_i16(gpufx_min(sumA >> 13, (1 << 15) - 1));
+}
+
+/* A vertical filter of two taps that packed_vscale() gives to the 2-tap
+ * output function */
+GPUFX_DEV bool gpufx_sws_two_taps(const gpufx_i16 *f)
+{
+    const gpufx_u32 f0 = gpufx_u16(f[0]);
+    const gpufx_u32 f1 = gpufx_u16(f[1]);
+    return f1 + f0 == 4096 && f1 <= 4096u;
+}
+
+/* The vertical pass and the output (packed_vscale(), then
+ * yuv2rgb_full_1_c_template() for single taps, yuv2rgb_full_2_c_template()
+ * for two taps or yuv2rgb_full_X_c_template(), and yuv2rgb_write_full()):
+ * planes of gpufx_sws_scale_rgba_h(), width x srcHeight, to dst, width x
+ * dstHeight. The filters have one tap each, or more taps each. */
+GPUFX_KERNEL void gpufx_sws_scale_rgba_v(const gpufx_i16 *__restrict__ planes, int width, int srcHeight, gpufx_u32 *__restrict__ dst, int dstHeight,
+                                         const gpufx_i16 *__restrict__ lumFilter, const int *__restrict__ lumPos, int lumSize,
+                                         const gpufx_i16 *__restrict__ chrFilter, const int *__restrict__ chrPos, int chrSize, int yOffset, int yCoeff,
+                                         int v2r, int v2g, int u2g, int u2b)
+{
+    const int x = GPUFX_GLOBAL_X;
+    const int y = GPUFX_GLOBAL_Y;
+    if (x >= width || y >= dstHeight) {
+        return;
+    }
+    const size_t plane = size_t(width) * size_t(srcHeight);
+    const gpufx_i16 *lumaPlane = planes;
+    const gpufx_i16 *uPlane = planes + plane;
+    const gpufx_i16 *vPlane = planes + 2 * plane;
+    const gpufx_i16 *alphaPlane = planes + 3 * plane;
+    const gpufx_i16 *lf = lumFilter + y * lumSize;
+    const gpufx_i16 *cf = chrFilter + y * chrSize;
+    int Y;
+    int U;
+    int V;
+    int A;
+    if (lumSize == 1 && chrSize == 1) {
+        const size_t l = size_t(lumPos[y]) * size_t(width) + size_t(x);
+        const size_t c = size_t(chrPos[y]) * size_t(width) + size_t(x);
+        Y = lumaPlane[l] * 4;
+        U = (uPlane[c] - (128 << 7)) * 4;
+        V = (vPlane[c] - (128 << 7)) * 4;
+        A = (alphaPlane[l] + 64) >> 7;
+    } else if (lumSize == 2 && chrSize == 2 && gpufx_sws_two_taps(lf) && gpufx_sws_two_taps(cf)) {
+        const int yalpha = gpufx_u16(lf[1]);
+        const int yalpha1 = 4096 - yalpha;
+        const int uvalpha = gpufx_u16(cf[1]);
+        const int uvalpha1 = 4096 - uvalpha;
+        const size_t l0 = size_t(lumPos[y]) * size_t(width) + size_t(x);
+        const size_t l1 = size_t(gpufx_min(lumPos[y] + 1, srcHeight - 1)) * size_t(width) + size_t(x);
+        const size_t c0 = size_t(chrPos[y]) * size_t(width) + size_t(x);
+        const size_t c1 = size_t(gpufx_min(chrPos[y] + 1, srcHeight - 1)) * size_t(width) + size_t(x);
+        Y = (lumaPlane[l0] * yalpha1 + lumaPlane[l1] * yalpha) >> 10;
+        U = (uPlane[c0] * uvalpha1 + uPlane[c1] * uvalpha - (128 << 19)) >> 10;
+        V = (vPlane[c0] * uvalpha1 + vPlane[c1] * uvalpha - (128 << 19)) >> 10;
+        A = (alphaPlane[l0] * yalpha1 + alphaPlane[l1] * yalpha + (1 << 18)) >> 19;
+    } else {
+        Y = 1 << 9;
+        U = (1 << 9) - (128 << 19);
+        V = (1 << 9) - (128 << 19);
+        A = 1 << 18;
+        for (int j = 0; j < lumSize; ++j) {
+            const size_t l = size_t(gpufx_min(lumPos[y] + j, srcHeight - 1)) * size_t(width) + size_t(x);
+            Y += lumaPlane[l] * lf[j];
+            A += alphaPlane[l] * lf[j];
+        }
+        for (int j = 0; j < chrSize; ++j) {
+            const size_t c = size_t(gpufx_min(chrPos[y] + j, srcHeight - 1)) * size_t(width) + size_t(x);
+            U += uPlane[c] * cf[j];
+            V += vPlane[c] * cf[j];
+        }
+        Y >>= 10;
+        U >>= 10;
+        V >>= 10;
+        A >>= 19;
+    }
+    if (A & 0x100) {
+        A = gpufx_clamp(A, 0, 255);
+    }
+    // yuv2rgb_write_full()
+    Y -= yOffset;
+    Y *= yCoeff;
+    Y += 1 << 21;
+    int R = int(gpufx_u32(Y) + gpufx_u32(V) * gpufx_u32(v2r));
+    int G = int(gpufx_u32(Y) + gpufx_u32(V) * gpufx_u32(v2g) + gpufx_u32(U) * gpufx_u32(u2g));
+    int B = int(gpufx_u32(Y) + gpufx_u32(U) * gpufx_u32(u2b));
+    if ((R | G | B) & 0xC0000000) {
+        R = gpufx_clip_uintp2_30(R);
+        G = gpufx_clip_uintp2_30(G);
+        B = gpufx_clip_uintp2_30(B);
+    }
+    dst[size_t(y) * size_t(width) + size_t(x)] = gpufx_pack(gpufx_u32(R >> 22), gpufx_u32(G >> 22), gpufx_u32(B >> 22), gpufx_u32(A) & 0xFFu);
+}

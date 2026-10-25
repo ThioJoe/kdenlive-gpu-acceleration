@@ -12,6 +12,7 @@
  * from MLT 7.40 to 7.43 for everything used here.
  */
 
+#include "convert.h"
 #include "normalizer.h"
 
 #include <cmath>
@@ -237,6 +238,50 @@ void scaleAlpha(mlt_frame frame, int iwidth, int iheight, int owidth, int oheigh
     mlt_frame_set_alpha(frame, output, owidth * oheight, mlt_pool_release);
 }
 
+/** filter_scale() of filter_swscale.c for RGBA, on the GPU: the scaling
+ *  methods Kdenlive offers, for frames without a separate alpha plane */
+bool rescaleGpuWork(NormalizerCall &call, GpuScope &scope, CUdeviceptr in, int inWidth, int inHeight, DeviceBuffer &out, CUresult &result)
+{
+    mlt_properties properties = call.properties;
+    int alphaSize = 0;
+    if (mlt_frame_get_alpha_size(call.frame, &alphaSize) && alphaSize > 0) {
+        return false;
+    }
+    // The interpolation as filter_scale() maps it to libswscale's flags
+    const char *interps = mlt_properties_get(properties, "consumer.rescale");
+    sws::ScaleMethod luma = sws::ScaleBilinear;
+    sws::ScaleMethod chroma = sws::ScaleBilinear;
+    if (strcmp(interps, "nearest") == 0 || strcmp(interps, "neighbor") == 0) {
+        luma = chroma = sws::ScalePoint;
+    } else if (strcmp(interps, "tiles") == 0 || strcmp(interps, "fast_bilinear") == 0) {
+        return false;
+    } else if (strcmp(interps, "bilinear") == 0) {
+        luma = chroma = sws::ScaleBilinear;
+    } else if (strcmp(interps, "bicubic") == 0) {
+        luma = chroma = sws::ScaleBicubic;
+    } else if (strcmp(interps, "bicublin") == 0) {
+        luma = sws::ScaleBicubic;
+        chroma = sws::ScaleBilinear;
+    } else if (strcmp(interps, "gauss") == 0 || strcmp(interps, "sinc") == 0 || strcmp(interps, "spline") == 0) {
+        return false;
+    } else if (strcmp(interps, "hyper") == 0 || strcmp(interps, "lanczos") == 0) {
+        luma = chroma = sws::ScaleLanczos;
+    }
+    // The colorspaces given to mlt_set_luma_transfer()
+    mlt_profile profile = mlt_service_profile(MLT_PRODUCER_SERVICE(mlt_frame_get_original_producer(call.frame)));
+    const int dstColorspace = profile ? profile->colorspace : mlt_colorspace_bt601;
+    const int srcColorspace = mlt_image_colorspace_id(mlt_properties_get(properties, "colorspace"));
+    result = scaleRgba(scope, in, inWidth, inHeight, call.targetWidth, call.targetHeight, luma, chroma, srcColorspace, dstColorspace, out);
+    if (result == CUDA_ERROR_NOT_SUPPORTED) {
+        result = CUDA_SUCCESS;
+        return false;
+    }
+    mlt_properties_set_int(properties, "full_range", mlt_image_full_range(mlt_properties_get(properties, "consumer.color_range")));
+    call.outWidth = call.targetWidth;
+    call.outHeight = call.targetHeight;
+    return true;
+}
+
 /** filter_get_image() of filter_rescale.c after the fetch, with the scaler
  *  of the filter (swscale's) */
 int rescaleWork(NormalizerCall &call, uint8_t **image, int *width, int *height)
@@ -416,7 +461,7 @@ const NormalizerDescriptor kNormalizers[] = {
     {"color_transform", nullptr, 1, colorTransformBefore, passFetched, nullptr, nullptr},
     {"fieldorder", nullptr, 0, fieldOrderBefore, fieldOrderAfter, nullptr, fieldOrderWork},
     {"crop", nullptr, 1, cropBefore, passFetched, nullptr, nullptr},
-    {"rescale", "swscale", 1, rescaleBefore, rescaleAfter, nullptr, rescaleWork},
+    {"rescale", "swscale", 1, rescaleBefore, rescaleAfter, rescaleGpuWork, rescaleWork},
     {"resize", nullptr, 2, resizeBefore, resizeAfter, resizeGpuWork, resizeWork},
 };
 

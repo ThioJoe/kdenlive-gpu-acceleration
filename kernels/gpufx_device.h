@@ -20,6 +20,7 @@
 
 typedef unsigned char gpufx_u8;
 typedef unsigned short gpufx_u16;
+typedef short gpufx_i16;
 typedef unsigned int gpufx_u32;
 typedef unsigned long long gpufx_u64;
 typedef long long gpufx_i64;
@@ -56,6 +57,7 @@ GPUFX_DEV float gpufx_fdiv_rn(float a, float b)
 
 typedef uint8_t gpufx_u8;
 typedef uint16_t gpufx_u16;
+typedef int16_t gpufx_i16;
 typedef uint32_t gpufx_u32;
 typedef uint64_t gpufx_u64;
 typedef int64_t gpufx_i64;

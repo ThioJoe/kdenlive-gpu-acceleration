@@ -6,8 +6,9 @@
 
 /*
  * The parts of libswscale's setup that decide the arithmetic of the
- * conversions MLT does between YUV and RGBA, ported so that the GPU kernels
- * get the same coefficients and sampling positions as the CPU.
+ * conversions MLT does between YUV and RGBA, and of its scaling of RGBA
+ * images, ported so that the GPU kernels get the same coefficients, filters
+ * and sampling positions as the CPU.
  *
  * The code paths were compared between FFmpeg 6.1, 7.1 and 8.0: the parts
  * used here do not differ.
@@ -15,6 +16,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 namespace gpufx {
@@ -69,6 +71,26 @@ void chroma420Samples(int width, int height, bool fields, std::vector<int> &colu
  *  packed 4:2:2 YUV of the given width to RGB with SWS_POINT and full chroma
  *  interpolation, as MLT's avcolour_space does. */
 void chroma422Columns(int width, std::vector<int> &columns);
+
+/** The scaling methods (SWS_* flags) whose filters are ported */
+enum ScaleMethod { ScalePoint, ScaleBilinear, ScaleBicubic, ScaleLanczos };
+
+/** A filter of libswscale's scaler: size coefficients for every output
+ *  sample, applied to the input samples from its position on. */
+struct ScaleFilter
+{
+    int size = 0;
+    std::vector<int16_t> coefficients;
+    std::vector<int32_t> positions;
+};
+
+/** initFilter() as sws_init_context() calls it on x86 to scale packed RGB
+ *  without chroma subsampling (SWS_FULL_CHR_H_INP and SWS_FULL_CHR_H_INT),
+ *  for luma and chroma alike, from srcSize to dstSize samples: the horizontal
+ *  filter, whose coefficients sum to 1 << 14, or the vertical one (1 << 12).
+ *  Returns false where libswscale would scale in two passes instead (filters
+ *  too long), and on other processors than x86-64. */
+bool scaleFilter(ScaleMethod method, bool vertical, int srcSize, int dstSize, ScaleFilter &filter);
 
 } // namespace sws
 } // namespace gpufx
