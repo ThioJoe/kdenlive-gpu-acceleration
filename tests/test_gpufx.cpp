@@ -812,6 +812,227 @@ void testCompositing(mlt_profile profile)
     }
 }
 
+std::string tempPath(const std::string &name);
+
+/** Renders frames of MLT's luma transition from a clip on track 0 (the
+ *  bottom) to one on track 1, with filters on both clips, at positions of a
+ *  transition of 10 frames. With converters, the clips have an avcolor_space
+ *  filter, which lets MLT convert their images as the loader's does. With a
+ *  background, the tractor is a track composited onto it by a qtblend
+ *  transition, as in Kdenlive's projects. */
+std::vector<Image> renderLuma(mlt_profile profile, const Image &bottom, const Image &top, const std::vector<FilterSpec> &bottomFilters,
+                              const std::vector<FilterSpec> &topFilters, const Properties &lumaProperties, bool cpu, const std::vector<mlt_position> &positions,
+                              bool converters = true, const Image *background = nullptr)
+{
+    mlt_tractor tractor = mlt_tractor_new();
+    mlt_multitrack multitrack = mlt_tractor_multitrack(tractor);
+    mlt_field field = mlt_tractor_field(tractor);
+    std::vector<mlt_producer> producers;
+    std::vector<mlt_filter> filters;
+    const Image *images[2] = {&bottom, &top};
+    const std::vector<FilterSpec> *specs[2] = {&bottomFilters, &topFilters};
+    for (int i = 0; i < 2; ++i) {
+        mlt_producer producer = patternProducer(profile, images[i]);
+        if (converters) {
+            mlt_filter converter = mlt_factory_filter(profile, "avcolor_space", nullptr);
+            mlt_producer_attach(producer, converter);
+            filters.push_back(converter);
+        }
+        for (mlt_filter filter : createFilters(profile, *specs[i], cpu)) {
+            mlt_producer_attach(producer, filter);
+            filters.push_back(filter);
+        }
+        mlt_multitrack_connect(multitrack, producer, i);
+        producers.push_back(producer);
+    }
+    mlt_transition transition = mlt_factory_transition(profile, "luma", nullptr);
+    mlt_properties properties = MLT_TRANSITION_PROPERTIES(transition);
+    for (const auto &property : lumaProperties) {
+        mlt_properties_set(properties, property.first, property.second.c_str());
+    }
+    mlt_properties_set_int(properties, "_gpufx.disable", cpu ? 1 : 0);
+    mlt_transition_set_in_and_out(transition, 0, 9);
+    mlt_field_plant_transition(field, transition, 0, 1);
+    mlt_tractor outer = nullptr;
+    mlt_transition compositing = nullptr;
+    if (background) {
+        outer = mlt_tractor_new();
+        mlt_producer producer = patternProducer(profile, background);
+        producers.push_back(producer);
+        mlt_multitrack_connect(mlt_tractor_multitrack(outer), producer, 0);
+        mlt_multitrack_connect(mlt_tractor_multitrack(outer), MLT_TRACTOR_PRODUCER(tractor), 1);
+        compositing = mlt_factory_transition(profile, "qtblend", nullptr);
+        mlt_properties_set_int(MLT_TRANSITION_PROPERTIES(compositing), "always_active", 1);
+        mlt_properties_set_int(MLT_TRANSITION_PROPERTIES(compositing), "_gpufx.disable", cpu ? 1 : 0);
+        mlt_field_plant_transition(mlt_tractor_field(outer), compositing, 0, 1);
+    }
+    mlt_tractor output = outer ? outer : tractor;
+    std::vector<Image> outputs;
+    for (mlt_position position : positions) {
+        mlt_producer_seek(MLT_TRACTOR_PRODUCER(output), position);
+        mlt_frame frame = nullptr;
+        mlt_service_get_frame(MLT_TRACTOR_SERVICE(output), &frame, 0);
+        Image output;
+        if (frame) {
+            uint8_t *image = nullptr;
+            mlt_image_format format = mlt_image_rgba;
+            int width = profile->width;
+            int height = profile->height;
+            if (!mlt_frame_get_image(frame, &image, &format, &width, &height, 0) && image && format == mlt_image_rgba) {
+                output.width = width;
+                output.height = height;
+                output.pixels.assign(image, image + size_t(width) * size_t(height) * 4);
+            } else {
+                fprintf(stderr, "luma: get_image failed, format %d\n", int(format));
+            }
+            mlt_frame_close(frame);
+        }
+        outputs.push_back(output);
+    }
+    if (outer) {
+        mlt_transition_close(compositing);
+        mlt_tractor_close(outer);
+    }
+    mlt_transition_close(transition);
+    mlt_tractor_close(tractor);
+    for (mlt_filter filter : filters) {
+        mlt_filter_close(filter);
+    }
+    for (mlt_producer producer : producers) {
+        mlt_producer_close(producer);
+    }
+    return outputs;
+}
+
+/** Kdenlive's dissolves, mixes and wipes: MLT's luma transition */
+void testLuma(mlt_profile profile)
+{
+    if (!mlt_properties_get_data(mlt_repository_transitions(mlt_factory_repository()), "luma", nullptr) || !hasFilter("avcolor_space")) {
+        printf("SKIP: MLT has no luma transition or avcolor_space filter\n");
+        return;
+    }
+    // A luma map: a 16-bit PGM with a diagonal gradient
+    const std::string map = tempPath("gpufx_luma_map.pgm");
+    {
+        const int w = 64;
+        const int h = 36;
+        std::string pgm = "P5\n" + std::to_string(w) + " " + std::to_string(h) + "\n65535\n";
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const int v = (x * 65535 / (w - 1) + y * 65535 / (h - 1)) / 2 ^ ((x * y) & 0x3f);
+                pgm += char(v >> 8);
+                pgm += char(v & 0xff);
+            }
+        }
+        FILE *file = fopen(map.c_str(), "wb");
+        if (!file) {
+            check(false, "cannot write %s", map.c_str());
+            return;
+        }
+        fwrite(pgm.data(), 1, pgm.size(), file);
+        fclose(file);
+    }
+    const std::vector<mlt_position> positions = {0, 1, 3, 5, 8, 9};
+    const std::vector<FilterSpec> none;
+    const std::vector<FilterSpec> blur = {{"box_blur", {{"hradius", "20"}, {"vradius", "15"}}}};
+    struct Case
+    {
+        const char *what;
+        Properties properties;
+        int bottomPattern;
+        int topPattern;
+        int width;
+        bool converters;
+    };
+    const std::string resource = map;
+    const std::vector<Case> cases = {
+        {"dissolve with transparency", {{"alpha_over", "1"}, {"resource", ""}}, 1, 3, 0, true},
+        {"dissolve with transparency, opaque", {{"alpha_over", "1"}}, 4, 4, 0, true},
+        {"dissolve with transparency, reverse", {{"alpha_over", "1"}, {"reverse", "1"}}, 2, 0, 0, true},
+        {"dissolve", {{"fix_background_alpha", "1"}, {"resource", ""}}, 1, 3, 0, true},
+        {"dissolve, opaque", {{"fix_background_alpha", "1"}}, 4, 4, 0, true},
+        {"dissolve, invert", {{"fix_background_alpha", "1"}, {"invert", "1"}}, 0, 2, 0, true},
+        {"dissolve, width not a multiple of 8", {{"fix_background_alpha", "1"}}, 1, 2, 166, true},
+        {"dissolve, narrow", {{"fix_background_alpha", "1"}}, 3, 1, 6, true},
+        {"dissolve without background alpha fix", {}, 1, 3, 0, true},
+        {"wipe", {{"resource", resource}, {"progressive", "1"}}, 4, 4, 0, true},
+        {"wipe, soft, translucent", {{"resource", resource}, {"progressive", "1"}, {"softness", "0.3"}}, 1, 3, 0, true},
+        {"wipe with transparency, soft, translucent", {{"resource", resource}, {"progressive", "1"}, {"softness", "0.2"}, {"alpha_over", "1"}}, 2, 0, 0,
+         true},
+        {"wipe, reverse, soft", {{"resource", resource}, {"progressive", "1"}, {"softness", "0.5"}, {"reverse", "1"}}, 4, 2, 0, true},
+    };
+    const int profileWidth = profile->width;
+    const int profileColorspace = profile->colorspace;
+    for (int colorspace : {profileColorspace, profileColorspace == 709 ? 601 : 709}) {
+        profile->colorspace = colorspace;
+        for (const Case &c : cases) {
+            profile->width = c.width ? c.width : profileWidth;
+            const Image bottom = makeImage(profile->width, profile->height, c.bottomPattern);
+            const Image top = makeImage(profile->width, profile->height, c.topPattern);
+            // The clips have an effect on the GPU, the transition finds their
+            // images there
+            const std::vector<Image> cpu = renderLuma(profile, bottom, top, blur, blur, c.properties, true, positions, c.converters);
+            const std::vector<Image> gpu = renderLuma(profile, bottom, top, blur, blur, c.properties, false, positions, c.converters);
+            for (size_t i = 0; i < positions.size(); ++i) {
+                const Difference d = compare(cpu[i], gpu[i]);
+                check(!cpu[i].pixels.empty() && !d.sizeMismatch && d.pixels == 0, "luma, %s, colorspace %d, frame %d: %ld pixels differ, channel diff %d", c.what,
+                      colorspace, int(positions[i]), d.pixels, d.maxChannel);
+            }
+        }
+    }
+    profile->width = profileWidth;
+    profile->colorspace = profileColorspace;
+
+    if (g_mock.active() && hasFilter("box_blur")) {
+        // Images in host memory are blended on the CPU, apart from the YUV
+        // dissolve, which also saves conversions
+        for (size_t index : {size_t(0), size_t(3), size_t(10)}) {
+            const Image bottom = makeImage(profile->width, profile->height, 1);
+            const Image top = makeImage(profile->width, profile->height, 2);
+            g_mock.reset();
+            renderLuma(profile, bottom, top, none, none, cases[index].properties, false, {4});
+            check((g_mock.stats().launches > 0) == (index == 3), "luma, %s, images in host memory: %llu kernel launches", cases[index].what,
+                  (unsigned long long)g_mock.stats().launches);
+        }
+
+        // Clips whose images are on the GPU stay there through the
+        // transition: one download for the result
+        const Image bottom = makeImage(profile->width, profile->height, 1);
+        const Image top = makeImage(profile->width, profile->height, 2);
+        for (size_t index : {size_t(0), size_t(3), size_t(10)}) {
+            const Case &c = cases[index];
+            // A wipe's first frame loads the luma map on the CPU
+            const uint64_t downloads = index == 10 ? 3 : 2;
+            const std::vector<mlt_position> two = {2, 4};
+            const std::vector<Image> cpu = renderLuma(profile, bottom, top, blur, blur, c.properties, true, two);
+            g_mock.reset();
+            const std::vector<Image> gpu = renderLuma(profile, bottom, top, blur, blur, c.properties, false, two);
+            const MockCudaStats stats = g_mock.stats();
+            check(compare(cpu[1], gpu[1]).pixels == 0, "luma, %s, after GPU effects: the result differs", c.what);
+            check(stats.downloads == downloads, "luma, %s, after GPU effects: %llu downloads for 2 frames", c.what, (unsigned long long)stats.downloads);
+            check(stats.misuse == 0, "luma, %s: %llu invalid CUDA calls", c.what, (unsigned long long)stats.misuse);
+
+            // The same in a track composited onto a background, as in
+            // Kdenlive's projects: the transition's result stays on the GPU
+            // for the compositing
+            const Image background = makeImage(profile->width, profile->height, 4);
+            const std::vector<Image> cpuTrack = renderLuma(profile, bottom, top, blur, blur, c.properties, true, two, true, &background);
+            g_mock.reset();
+            const std::vector<Image> gpuTrack = renderLuma(profile, bottom, top, blur, blur, c.properties, false, two, true, &background);
+            const MockCudaStats trackStats = g_mock.stats();
+            for (size_t i = 0; i < two.size(); ++i) {
+                const Difference d = compare(cpuTrack[i], gpuTrack[i]);
+                check(!cpuTrack[i].pixels.empty() && !d.sizeMismatch && d.pixels == 0, "luma, %s, in a composited track, frame %d: %ld pixels differ", c.what,
+                      int(two[i]), d.pixels);
+            }
+            // Besides the results, the compositing downloads its opacity checks
+            check(trackStats.downloads == downloads + 2, "luma, %s, in a composited track: %llu downloads for 2 frames", c.what,
+                  (unsigned long long)trackStats.downloads);
+        }
+    }
+    remove(map.c_str());
+}
+
 void testChains(mlt_profile profile)
 {
     const Image input = makeImage(120, 80, 2);
@@ -1711,8 +1932,8 @@ void testSettingsFile(mlt_profile profile, bool expectGpu)
     }
     check(host->version == GPUFX_SETTINGS_API_VERSION && !strcmp(host->group, "gpufx"), "settings host: version %d, group %s", host->version, host->group);
     const std::string services = std::string(",") + host->services + ",";
-    for (const char *service : {",effect:dropshadow,", ",effect:qtblend,", ",transition:qtblend,", ",conversion:avformat,", ",conversion:avcolor_space,", ",conversion:normalize,",
-                             ",conversion:stills,"}) {
+    for (const char *service : {",effect:dropshadow,", ",effect:qtblend,", ",transition:qtblend,", ",transition:luma,", ",conversion:avformat,",
+                                ",conversion:avcolor_space,", ",conversion:normalize,", ",conversion:stills,"}) {
         check(services.find(service) != std::string::npos, "settings host: %s is not in the services %s", service, host->services);
     }
     char text[1024];
@@ -1747,7 +1968,7 @@ void testSettingsFile(mlt_profile profile, bool expectGpu)
               && status.effects.find(",brightness,") != std::string::npos && status.effects.find(",frei0r.glow,") != std::string::npos
               && status.effects.find(",frei0r.sharpness,") != std::string::npos,
           "settings: effects missing from the GPU: %s", status.effects.c_str());
-    check(status.transitions == ",,", "settings: transition:qtblend=off was not read: %s", status.transitions.c_str());
+    check(status.transitions == ",luma,", "settings: transition:qtblend=off was not read: %s", status.transitions.c_str());
     check(status.conversions == ",avcolor_space,normalize,stills,", "settings: conversion:avformat=0 was not read: %s", status.conversions.c_str());
     if (g_mock.active() && hasFilter("dropshadow") && hasFilter("boxblur")) {
         g_mock.reset();
@@ -1762,7 +1983,7 @@ void testSettingsFile(mlt_profile profile, bool expectGpu)
     remove(g_settingsFile.c_str());
     host->reload_settings();
     status = moduleStatus(profile);
-    check(status.enabled == 1 && status.effects.find(",dropshadow,") != std::string::npos && status.transitions == ",qtblend,"
+    check(status.enabled == 1 && status.effects.find(",dropshadow,") != std::string::npos && status.transitions == ",qtblend,luma,"
               && status.conversions == ",avformat,avcolor_space,normalize,stills,",
           "settings: the defaults did not come back without a file");
 
@@ -1953,6 +2174,7 @@ int main(int argc, char **argv)
     testFrei0r(profile);
     testTransform(profile);
     testCompositing(profile);
+    testLuma(profile);
     testChains(profile);
     testProducer(profile);
     testDecoding(profile);

@@ -168,6 +168,9 @@ public:
     virtual bool prepare(int topWidth, int topHeight, int bottomWidth, int bottomHeight) = 0;
     /** Draws top onto bottom into out (bottom size). */
     virtual CUresult run(GpuScope &scope, CUdeviceptr top, CUdeviceptr bottom, CUdeviceptr out) = 0;
+    /** Called when the RGBA result of run() is delivered, for the frame
+     *  properties the CPU transition sets. */
+    virtual void finishFrame(mlt_frame aFrame) { (void)aFrame; }
 };
 
 struct TransitionPlan
@@ -212,5 +215,6 @@ const EffectDescriptor &frei0rSoftGlowEffect();
 const EffectDescriptor &frei0rSharpnessEffect();
 const EffectDescriptor &transformEffect();
 const TransitionDescriptor &compositeTransition();
+const TransitionDescriptor &lumaTransition();
 
 } // namespace gpufx

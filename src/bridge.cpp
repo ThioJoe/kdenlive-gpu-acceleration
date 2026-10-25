@@ -985,6 +985,7 @@ int runTransitionOnGpu(mlt_frame aFrame, mlt_get_image cpuGetImage, const Transi
                     handoff->height = bottom.height;
                     handoff->tag = bottom.host;
                     attachDeviceImage(aProperties, std::move(handoff));
+                    job.finishFrame(aFrame);
                     // The CPU transition drops the top image
                     mlt_frame_set_image(bFrame, nullptr, 0, nullptr);
                     *image = bottom.host;
@@ -1011,6 +1012,7 @@ int runTransitionOnGpu(mlt_frame aFrame, mlt_get_image cpuGetImage, const Transi
                 }
                 if (res == CUDA_SUCCESS) {
                     mlt_frame_set_image(aFrame, result, int(bytes), releaseImage);
+                    job.finishFrame(aFrame);
                     mlt_frame_set_image(bFrame, nullptr, 0, nullptr);
                     *image = result;
                     *format = mlt_image_rgba;
@@ -1565,6 +1567,12 @@ int wrappedStillGetFrame(mlt_producer producer, mlt_frame_ptr frame, int index)
 }
 
 } // namespace
+
+bool convertsWithAvcolourSpace(mlt_frame frame)
+{
+    void *converter = frameConverter(frame);
+    return converter && converter == avcolourConverter() && serviceEnabled("conversion", "avcolor_space");
+}
 
 void wrapTransition(mlt_transition transition, const TransitionDescriptor &descriptor)
 {

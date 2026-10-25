@@ -49,6 +49,14 @@ GPUFX_DEV float gpufx_fdiv_rn(float a, float b)
 {
     return __fdiv_rn(a, b);
 }
+GPUFX_DEV float gpufx_fadd_rn(float a, float b)
+{
+    return __fadd_rn(a, b);
+}
+GPUFX_DEV float gpufx_fsub_rn(float a, float b)
+{
+    return __fsub_rn(a, b);
+}
 
 #else // CPU emulation used by the tests
 
@@ -99,6 +107,16 @@ GPUFX_DEV float gpufx_fmul_rn(float a, float b)
 GPUFX_DEV float gpufx_fdiv_rn(float a, float b)
 {
     volatile float r = a / b;
+    return r;
+}
+GPUFX_DEV float gpufx_fadd_rn(float a, float b)
+{
+    volatile float r = a + b;
+    return r;
+}
+GPUFX_DEV float gpufx_fsub_rn(float a, float b)
+{
+    volatile float r = a - b;
     return r;
 }
 

@@ -27,6 +27,10 @@ void wrapNormalizer(mlt_filter filter, const NormalizerDescriptor &descriptor);
  *  then keeps on the GPU (see stills.h). */
 void wrapStill(mlt_producer producer, const StillDescriptor &descriptor);
 
+/** True if MLT converts the frame's images with avcolour_space, whose
+ *  conversions between RGBA and YUV the GPU reproduces (see convert.h). */
+bool convertsWithAvcolourSpace(mlt_frame frame);
+
 /** Module wide switches (environment, settings, MLT global properties, per
  *  service). kind is "effect", "transition" or "conversion" (avformat for the
  *  decoding to RGBA, avcolor_space for the conversion to YUV, normalize for

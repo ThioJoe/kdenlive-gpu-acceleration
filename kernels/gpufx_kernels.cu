@@ -1060,17 +1060,9 @@ GPUFX_DEV int gpufx_sws_rgba_chroma(gpufx_u32 px0, gpufx_u32 px1, int cr, int cg
  * written by yuv2422_1_c_template(). When alpha is not null the alpha
  * channel is also copied there, one byte per pixel, as MLT's avcolour_space
  * does. One thread per pair of pixels, the width must be even. */
-GPUFX_KERNEL void gpufx_rgba_to_yuyv422(const gpufx_u32 *__restrict__ src, gpufx_u8 *__restrict__ dst, gpufx_u8 *__restrict__ alpha, int w, int h,
-                                        int ry, int gy, int by, int ru, int gu, int bu, int rv, int gv, int bv, int fullRange)
+GPUFX_DEV void gpufx_rgba_pair_to_yuyv(gpufx_u32 p0, gpufx_u32 p1, int ry, int gy, int by, int ru, int gu, int bu, int rv, int gv, int bv, int fullRange,
+                                       gpufx_u8 *out)
 {
-    const int pair = GPUFX_GLOBAL_X;
-    const int y = GPUFX_GLOBAL_Y;
-    if (2 * pair >= w || y >= h) {
-        return;
-    }
-    const size_t index = size_t(y) * size_t(w) + size_t(2 * pair);
-    const gpufx_u32 p0 = src[index];
-    const gpufx_u32 p1 = src[index + 1];
     int y0 = gpufx_sws_rgba_luma(p0, ry, gy, by);
     int y1 = gpufx_sws_rgba_luma(p1, ry, gy, by);
     int u = gpufx_sws_rgba_chroma(p0, p1, ru, gu, bu);
@@ -1091,11 +1083,24 @@ GPUFX_KERNEL void gpufx_rgba_to_yuyv422(const gpufx_u32 *__restrict__ src, gpufx
         U = gpufx_clamp(U, 0, 255);
         V = gpufx_clamp(V, 0, 255);
     }
-    gpufx_u8 *out = dst + index * 2;
     out[0] = gpufx_u8(Y1);
     out[1] = gpufx_u8(U);
     out[2] = gpufx_u8(Y2);
     out[3] = gpufx_u8(V);
+}
+
+GPUFX_KERNEL void gpufx_rgba_to_yuyv422(const gpufx_u32 *__restrict__ src, gpufx_u8 *__restrict__ dst, gpufx_u8 *__restrict__ alpha, int w, int h,
+                                        int ry, int gy, int by, int ru, int gu, int bu, int rv, int gv, int bv, int fullRange)
+{
+    const int pair = GPUFX_GLOBAL_X;
+    const int y = GPUFX_GLOBAL_Y;
+    if (2 * pair >= w || y >= h) {
+        return;
+    }
+    const size_t index = size_t(y) * size_t(w) + size_t(2 * pair);
+    const gpufx_u32 p0 = src[index];
+    const gpufx_u32 p1 = src[index + 1];
+    gpufx_rgba_pair_to_yuyv(p0, p1, ry, gy, by, ru, gu, bu, rv, gv, bv, fullRange, dst + index * 2);
     if (alpha) {
         alpha[index] = gpufx_u8(p0 >> 24);
         alpha[index + 1] = gpufx_u8(p1 >> 24);
@@ -1106,9 +1111,11 @@ GPUFX_KERNEL void gpufx_rgba_to_yuyv422(const gpufx_u32 *__restrict__ src, gpufx
  * the flags of gpufx_yuv420_to_rgba(): the same arithmetic, with the chroma of
  * the pixel's own row. columns gives the chroma sample of every pixel column.
  * The alpha channel comes from alphaSrc, an RGBA image of the same size, as
- * avcolour_space merges back the alpha plane it took out of the RGBA image. */
+ * avcolour_space merges back the alpha plane it took out of the RGBA image,
+ * or from the alpha plane alphaPlane when it is not null. */
 GPUFX_KERNEL void gpufx_yuyv422_to_rgba(const gpufx_u8 *__restrict__ src, const int *__restrict__ columns, const gpufx_u32 *__restrict__ alphaSrc,
-                                        gpufx_u32 *__restrict__ dst, int w, int h, int yOffset, int yCoeff, int v2r, int v2g, int u2g, int u2b)
+                                        const gpufx_u8 *__restrict__ alphaPlane, gpufx_u32 *__restrict__ dst, int w, int h, int yOffset, int yCoeff, int v2r,
+                                        int v2g, int u2g, int u2b)
 {
     const int x = GPUFX_GLOBAL_X;
     const int y = GPUFX_GLOBAL_Y;
@@ -1137,7 +1144,7 @@ GPUFX_KERNEL void gpufx_yuyv422_to_rgba(const gpufx_u8 *__restrict__ src, const 
         G = gpufx_clip_uintp2_30(G);
         B = gpufx_clip_uintp2_30(B);
     }
-    dst[pixel] = gpufx_pack(gpufx_u32(R >> 22), gpufx_u32(G >> 22), gpufx_u32(B >> 22), alphaSrc[pixel] >> 24);
+    dst[pixel] = gpufx_pack(gpufx_u32(R >> 22), gpufx_u32(G >> 22), gpufx_u32(B >> 22), alphaPlane ? gpufx_u32(alphaPlane[pixel]) : alphaSrc[pixel] >> 24);
 }
 
 /* An RGBA image placed at (offsetX, offsetY) in a larger one filled with
@@ -1372,4 +1379,179 @@ GPUFX_KERNEL void gpufx_rgba_to_yuv420(const gpufx_u32 *__restrict__ src, gpufx_
         dst[lumaSize + c] = gpufx_u8(gpufx_clamp(u >> 19, 0, 255));
         dst[lumaSize + chromaSizeBytes + c] = gpufx_u8(gpufx_clamp(v >> 19, 0, 255));
     }
+}
+
+/* ==========================================================================
+ * MLT's luma transition (transition_luma.c, LGPL-2.1-or-later, Meltytech):
+ * dissolves, and wipes along a luma map, with the single precision float and
+ * fixed point arithmetic of its C code.
+ * ========================================================================== */
+
+/* calculate_mix() and sample_mix() of transition_luma.c */
+GPUFX_DEV float gpufx_luma_mix(float weight, int alpha)
+{
+    return gpufx_fdiv_rn(gpufx_fmul_rn(weight, gpufx_i2f_rn(alpha)), 255.0f);
+}
+
+GPUFX_DEV gpufx_u32 gpufx_luma_sample(gpufx_u32 dest, gpufx_u32 src, float mix)
+{
+    return gpufx_f2u_rz(gpufx_fadd_rn(gpufx_fmul_rn(gpufx_i2f_rn(int(src)), mix), gpufx_fmul_rn(gpufx_i2f_rn(int(dest)), gpufx_fsub_rn(1.0f, mix))));
+}
+
+/* The colour channels of q mixed with those of p by mix (sample_mix()) */
+GPUFX_DEV gpufx_u32 gpufx_luma_sample_rgb(gpufx_u32 q, gpufx_u32 p, float mix)
+{
+    return gpufx_luma_sample(q & 0xffu, p & 0xffu, mix) | (gpufx_luma_sample((q >> 8) & 0xffu, (p >> 8) & 0xffu, mix) << 8) |
+           (gpufx_luma_sample((q >> 16) & 0xffu, (p >> 16) & 0xffu, mix) << 16);
+}
+
+/* dissolve_rgba32(): the bottom image dst dissolved into the top image src
+ * by weight, alpha channels included (alpha_over). */
+GPUFX_KERNEL void gpufx_luma_dissolve_rgba(const gpufx_u32 *__restrict__ src, const gpufx_u32 *__restrict__ dst, gpufx_u32 *__restrict__ out, int n, float weight)
+{
+    const int i = GPUFX_GLOBAL_X;
+    if (i >= n) {
+        return;
+    }
+    const gpufx_u32 p = src[i];
+    const gpufx_u32 q = dst[i];
+    const float mixA = gpufx_luma_mix(gpufx_fsub_rn(1.0f, weight), int(q >> 24));
+    float mixB = gpufx_luma_mix(weight, int(p >> 24));
+    const float mix2 = gpufx_fadd_rn(mixB, mixA);
+    if (mix2 != 0.0f) {
+        mixB = gpufx_fdiv_rn(mixB, mix2);
+    }
+    out[i] = gpufx_luma_sample_rgb(q, p, mixB) | (gpufx_f2u_rz(gpufx_fmul_rn(255.0f, mix2)) << 24);
+}
+
+/* smoothstep() of transition_luma.c: 16-bit fixed point */
+GPUFX_DEV gpufx_u32 gpufx_luma_smoothstep(int edge1, int edge2, gpufx_u32 a)
+{
+    if (a < gpufx_u32(edge1)) {
+        return 0;
+    }
+    if (a >= gpufx_u32(edge2)) {
+        return 0x10000;
+    }
+    a = ((a - gpufx_u32(edge1)) << 16) / gpufx_u32(edge2 - edge1);
+    return (((a * a) >> 16) * ((3u << 16) - (2 * a))) >> 16;
+}
+
+/* smoothstep_float() of transition_luma.c */
+GPUFX_DEV float gpufx_luma_smoothstep_float(float edge1, float edge2, float a)
+{
+    if (a < edge1) {
+        return 0.0f;
+    }
+    if (a >= edge2) {
+        return 1.0f;
+    }
+    a = gpufx_fdiv_rn(gpufx_fsub_rn(a, edge1), gpufx_fsub_rn(edge2, edge1));
+    return gpufx_fmul_rn(gpufx_fmul_rn(a, a), gpufx_fsub_rn(3.0f, gpufx_fmul_rn(2.0f, a)));
+}
+
+/* luma_composite_rgba32() of progressive frames: the bottom image dst wiped
+ * into the top image src along the luma map (mapWidth 16-bit values per
+ * row), sampled with the 16.16 fixed point steps xDiff and yDiff. pos is the
+ * position of the wipe and iPos the same in 16.16 fixed point, iSoftness the
+ * softness in 16.16 fixed point. translucent is the result of
+ * gpufx_alpha_check() on both images. Translucent pixels get the alpha of
+ * the mix with addAlpha unset (alpha_over, and MLT 7.40 and older), the
+ * bottom alpha plus the share of the top image with addAlpha set. One
+ * thread per pixel. */
+GPUFX_KERNEL void gpufx_luma_wipe_rgba(const gpufx_u32 *__restrict__ src, const gpufx_u32 *__restrict__ dst, gpufx_u32 *__restrict__ out, int w, int h,
+                                       const gpufx_u16 *__restrict__ map, int mapWidth, int xDiff, int yDiff, float pos, float softness, gpufx_u32 iPos,
+                                       gpufx_u32 iSoftness, const int *__restrict__ translucent, int addAlpha)
+{
+    const int x = GPUFX_GLOBAL_X;
+    const int y = GPUFX_GLOBAL_Y;
+    if (x >= w || y >= h) {
+        return;
+    }
+    const size_t i = size_t(y) * size_t(w) + size_t(x);
+    const gpufx_u32 p = src[i];
+    const gpufx_u32 q = dst[i];
+    const int weight = map[size_t((y * yDiff) >> 16) * size_t(mapWidth) + size_t((x * xDiff) >> 16)];
+    if (*translucent) {
+        const float weightF = gpufx_fdiv_rn(gpufx_i2f_rn(weight), 65535.0f);
+        const float value = gpufx_luma_smoothstep_float(weightF, gpufx_fadd_rn(softness, weightF), pos);
+        const float mixA = gpufx_luma_mix(gpufx_fsub_rn(1.0f, value), int(q >> 24));
+        float mixB = gpufx_luma_mix(value, int(p >> 24));
+        const float mix2 = gpufx_fadd_rn(mixB, mixA);
+        gpufx_u32 alpha;
+        if (!addAlpha) {
+            alpha = gpufx_f2u_rz(gpufx_fmul_rn(255.0f, mix2));
+            if (mix2 != 0.0f) {
+                mixB = gpufx_fdiv_rn(mixB, mix2);
+            }
+        } else {
+            // CLAMP(q[3] + 255 * mix_b, 0, 255)
+            const float sum = gpufx_fadd_rn(gpufx_i2f_rn(int(q >> 24)), gpufx_fmul_rn(255.0f, mixB));
+            alpha = sum < 0.0f ? 0u : sum > 255.0f ? 255u : gpufx_f2u_rz(sum);
+        }
+        out[i] = gpufx_luma_sample_rgb(q, p, mixB) | (alpha << 24);
+    } else {
+        const gpufx_u32 value = gpufx_luma_smoothstep(weight, int(iSoftness + gpufx_u32(weight)), iPos);
+        gpufx_u32 result = q & 0xff000000u;
+        for (int shift = 0; shift < 24; shift += 8) {
+            const gpufx_u32 pc = (p >> shift) & 0xffu;
+            const gpufx_u32 qc = (q >> shift) & 0xffu;
+            result |= (((pc * value + qc * ((1u << 16) - value)) >> 16) & 0xffu) << shift;
+        }
+        out[i] = result;
+    }
+}
+
+/* dissolve_yuv422() without alpha_over, as Kdenlive's dissolves run it
+ * (fix_background_alpha): the bottom and top RGBA images converted to YUYV
+ * as gpufx_rgba_to_yuyv422() does (limited range, each with the
+ * coefficients of its own colorspace), and the top one blended onto the
+ * bottom one by composite_line_yuv() of transition_composite.c with their
+ * alpha channels, into dst and the alpha plane alpha. weight is the 16.16
+ * fixed point weight. MLT's x86-64 builds blend the first sseWidth pixels of
+ * a line with composite_line_yuv_sse2_simple(), which rounds differently,
+ * and the others with the C code. One thread per pair of pixels, the width
+ * must be even. */
+GPUFX_KERNEL void gpufx_luma_dissolve_yuyv(const gpufx_u32 *__restrict__ src, const gpufx_u32 *__restrict__ bottom, gpufx_u8 *__restrict__ dst,
+                                           gpufx_u8 *__restrict__ alpha, int w, int h, int weight, int sseWidth, int ry, int gy, int by, int ru, int gu, int bu,
+                                           int rv, int gv, int bv, int sry, int sgy, int sby, int sru, int sgu, int sbu, int srv, int sgv, int sbv)
+{
+    const int pair = GPUFX_GLOBAL_X;
+    const int y = GPUFX_GLOBAL_Y;
+    if (2 * pair >= w || y >= h) {
+        return;
+    }
+    const size_t index = size_t(y) * size_t(w) + size_t(2 * pair);
+    gpufx_u8 q[4];
+    gpufx_u8 p[4];
+    gpufx_rgba_pair_to_yuyv(bottom[index], bottom[index + 1], ry, gy, by, ru, gu, bu, rv, gv, bv, 0, q);
+    gpufx_rgba_pair_to_yuyv(src[index], src[index + 1], sry, sgy, sby, sru, sgu, sbu, srv, sgv, sbv, 0, p);
+    for (int k = 0; k < 2; ++k) {
+        const int alphaB = int(src[index + k] >> 24);
+        const int alphaA = int(bottom[index + k] >> 24);
+        int newAlpha;
+        if (2 * pair + k < sseWidth) {
+            // Source alpha premultiplied by the 8-bit weight, then
+            // ((v >> 8) + v + 128) >> 8 for the alpha and both samples
+            const int mix = (alphaB * (weight >> 8)) >> 8;
+            const int t = (255 - alphaA) * mix;
+            newAlpha = gpufx_min(255, alphaA + (((t >> 8) + t + 128) >> 8));
+            for (int c = 2 * k; c < 2 * k + 2; ++c) {
+                const int v = int(q[c]) * (255 - mix) + int(p[c]) * mix;
+                q[c] = gpufx_u8(gpufx_min(255, ((v >> 8) + v + 128) >> 8));
+            }
+        } else {
+            const int mix = (weight * (alphaB + 1)) >> 8;
+            newAlpha = ((mix >> 8) | alphaA) & 0xff;
+            for (int c = 2 * k; c < 2 * k + 2; ++c) {
+                q[c] = gpufx_u8((int(p[c]) * mix + int(q[c]) * ((1 << 16) - mix)) >> 16);
+            }
+        }
+        alpha[index + k] = gpufx_u8(newAlpha);
+    }
+    gpufx_u8 *out = dst + index * 2;
+    out[0] = q[0];
+    out[1] = q[1];
+    out[2] = q[2];
+    out[3] = q[3];
 }

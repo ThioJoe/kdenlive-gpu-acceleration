@@ -140,6 +140,7 @@ add_library(mltgpufx MODULE
     src/effect_color.cpp
     src/effect_dropshadow.cpp
     src/effect_frei0r.cpp
+    src/effect_luma.cpp
     src/effect_qtblend.cpp
     src/gpu_runtime.cpp
     src/module.cpp

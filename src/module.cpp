@@ -388,7 +388,7 @@ const std::vector<const EffectDescriptor *> &effectRegistry()
 
 const std::vector<const TransitionDescriptor *> &transitionRegistry()
 {
-    static const std::vector<const TransitionDescriptor *> transitions = {&compositeTransition()};
+    static const std::vector<const TransitionDescriptor *> transitions = {&compositeTransition(), &lumaTransition()};
     return transitions;
 }
 

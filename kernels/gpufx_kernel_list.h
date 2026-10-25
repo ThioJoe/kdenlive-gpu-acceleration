@@ -35,4 +35,7 @@
     X(gpufx_pad_rgba)                                                                                                                                          \
     X(gpufx_sws_scale_rgba_h)                                                                                                                                  \
     X(gpufx_sws_scale_rgba_v)                                                                                                                                  \
-    X(gpufx_rgba_to_yuv420)
+    X(gpufx_rgba_to_yuv420)                                                                                                                                    \
+    X(gpufx_luma_dissolve_rgba)                                                                                                                                \
+    X(gpufx_luma_wipe_rgba)                                                                                                                                    \
+    X(gpufx_luma_dissolve_yuyv)

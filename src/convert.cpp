@@ -170,8 +170,9 @@ CUresult convertRgbaThroughYuv422(GpuScope &scope, CUdeviceptr rgba, int width, 
         res = out.allocate(pixels * 4);
     }
     if (res == CUDA_SUCCESS) {
-        res = scope.launch2D(KernelId::gpufx_yuyv422_to_rgba, width, height, 32, 8, work.ptr() + yuvOffset, work.ptr(), rgba, out.ptr(), width, height,
-                             back.yOffset, back.yCoeff, back.v2r, back.v2g, back.u2g, back.u2b);
+        const CUdeviceptr noAlphaPlane = 0;
+        res = scope.launch2D(KernelId::gpufx_yuyv422_to_rgba, width, height, 32, 8, work.ptr() + yuvOffset, work.ptr(), rgba, noAlphaPlane, out.ptr(), width,
+                             height, back.yOffset, back.yCoeff, back.v2r, back.v2g, back.u2g, back.u2b);
     }
     return res;
 }

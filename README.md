@@ -94,6 +94,7 @@ MLT's module folder needs root.
 | Sharpen                             | `frei0r.sharpness`   | Identical output |
 | Transform                           | `qtblend`            | Matches the CPU filter (QPainter): same alpha, colors within one level. Alpha blend compositing and 8-bit only, see below |
 | Track compositing                   | `qtblend` transition | Matches the CPU transition: same alpha, colors within one level, see below |
+| Dissolve, Luma (wipes), same-track mixes | `luma` transition | Identical output, see below |
 | Video decoding to RGBA              | `avformat` producer  | Identical output, 8-bit 4:2:0 video, see below |
 | Output conversion to YUV            | `avcolor_space`      | Identical output, see below |
 | Clip size and field order           | MLT's normalizing filters | Identical output, see below |
@@ -161,6 +162,27 @@ The same cases as for Transform stay on the CPU (blend modes, 10-bit,
 rotation with *Distort*, scaling down with MLT 7.38). MLT 7.41 only exists as
 development versions (Kdenlive 26.08 ships one), which do not all size the
 images the same way: when that makes a difference, the CPU composites.
+
+### Dissolves and wipes
+
+Kdenlive's dissolves, same-track mixes and wipes use MLT's `luma`
+transition, which takes one of several code paths depending on its settings.
+The GPU version follows the same paths with the same arithmetic:
+
+* Without *Use transparency* (Kdenlive's default), MLT converts both images
+  to YUV 4:2:2, blends them there in fixed point (with the SSE2 code of
+  MLT's x86-64 builds, whose rounding differs from its C code) and converts
+  the result back to RGBA. All of it runs on the GPU, so these dissolves run
+  there even when both clips are in host memory.
+* With *Use transparency*, and for wipes along a luma map, the images are
+  blended in RGBA. Like track compositing, this only runs on the GPU when an
+  image is there already.
+
+These stay on the CPU: interlaced wipes, *Invert* on a wipe, video clips as
+luma maps, dissolves with *Make padding transparent* turned off and without
+*Use transparency*, and with MLT 7.41 development versions, wipes without
+*Use transparency* (MLT 7.42 changed how they blend transparent images). The
+first frame of a wipe is blended on the CPU, which loads the luma map.
 
 ### Image conversions
 
@@ -270,7 +292,7 @@ names it `kdenlive-appimagerc`), in a `[gpufx]` group:
 |-----------------------------|--------|
 | `enabled=false`             | GPU processing off |
 | `effect:<service>=false`    | Keep the effect with this MLT service on the CPU, e.g. `effect:dropshadow` |
-| `transition:qtblend=false`  | Keep track compositing on the CPU |
+| `transition:qtblend=false`  | Keep track compositing on the CPU (`transition:luma` for dissolves and wipes) |
 | `conversion:avformat=false` | Keep the decoding of video to RGBA on the CPU (`conversion:avcolor_space` for the output conversion to YUV, `conversion:normalize` for MLT's normalizing filters, `conversion:stills` for the pictures of still images, titles and color clips) |
 
 Every process using the module reads them when it starts, and Kdenlive again
