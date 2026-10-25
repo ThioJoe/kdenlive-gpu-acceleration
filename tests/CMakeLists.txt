@@ -37,6 +37,14 @@ if(TARGET gpufx-settings)
     set_target_properties(gpufx_settings_test PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     target_include_directories(gpufx_settings_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(gpufx_settings_test PRIVATE Qt6::Widgets KF6::ConfigWidgets KF6::ConfigCore Mlt7::mlt ${CMAKE_DL_LIBS})
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Qt built with reduce-relocations, like Kdenlive's, binds its own
+        # uses of its data: code using that data must be compiled with -fPIC
+        # (not -fPIE), else it gets copies of its own, and findChild() does
+        # not recognize Qt's meta objects. The Qt the test is built with may
+        # not ask for it.
+        target_compile_options(gpufx_settings_test PRIVATE -fPIC)
+    endif()
     target_compile_definitions(gpufx_settings_test PRIVATE
         QT_NO_VERSION_TAGGING
         GPUFX_TEST_MODULE="$<TARGET_FILE:mltgpufx>"
