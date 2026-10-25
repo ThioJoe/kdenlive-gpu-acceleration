@@ -403,6 +403,15 @@ jobs:
             timeout -k 30 240 dbus-run-session -- xvfb-run -a -s '-screen 0 1920x1080x24' "$root/AppRun" > "$GPUFX_SELFTEST_OUTPUT/kdenlive.log" 2>&1 || status=$?
             echo "=== $name" >&2
             cat "$GPUFX_SELFTEST_OUTPUT/kdenlive-report.txt" >&2 2>/dev/null || tail -n 40 "$GPUFX_SELFTEST_OUTPUT/kdenlive.log" >&2
+            # What the check, which ends Kdenlive at once, leaves running
+            local left
+            left=$(pgrep -a -u "$(id -u)" -f "$root|Xvfb|dbus-daemon --session" || true)
+            if [ -n "$left" ]; then
+              echo "left running, stopped:" >&2
+              echo "$left" >&2
+              pkill -KILL -u "$(id -u)" -f "$root|Xvfb|dbus-daemon --session" || true
+              sleep 2
+            fi
             if [ "$status" = 124 ] || [ "$status" = 137 ]; then
               echo "did not finish"
             else
