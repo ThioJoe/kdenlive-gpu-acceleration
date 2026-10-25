@@ -383,7 +383,12 @@ const std::vector<const EffectDescriptor *> &effectRegistry()
     static const std::vector<const EffectDescriptor *> effects = {
         &dropShadowEffect(),       &boxBlurEffect(),    &rectBlurEffect(),       &brightnessEffect(),      &liftGammaGainEffect(),
         &frei0rSquareBlurEffect(), &frei0rGlowEffect(), &frei0rSoftGlowEffect(), &frei0rSharpnessEffect(), &transformEffect(),
-        &frei0rScale0TiltEffect()};
+#if !defined(_WIN32)
+        // Kdenlive's Windows build of the plugin and of gavl rounds the
+        // scaler's positions differently (see gavl_port.h)
+        &frei0rScale0TiltEffect(),
+#endif
+    };
     return effects;
 }
 

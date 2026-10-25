@@ -519,25 +519,6 @@ void testFrei0r(mlt_profile profile)
                    *image, true);
         expectSame(profile, {{"frei0r.scale0tilt", {{"4", "0.2"}, {"5", "0.6"}, {"6", "0.1"}, {"7", "0.95"}}}}, *image, true);
     }
-    // TEMPORARY: what MLT's CPU scale0tilt makes of a small gradient
-    if (hasFilter("frei0r.scale0tilt")) {
-        Image ramp;
-        ramp.width = 12;
-        ramp.height = 4;
-        for (int y = 0; y < 4; ++y) {
-            for (int x = 0; x < 12; ++x) {
-                ramp.pixels.insert(ramp.pixels.end(), {uint8_t(20 * x), uint8_t(255 - 20 * x), uint8_t(7 * x + 60 * y), 255});
-            }
-        }
-        for (const char *scale : {"0.75", "0.65", "0.6"}) {
-            const Image out = render(profile, {{"frei0r.scale0tilt", {{"4", scale}, {"5", "0.5"}, {"6", "0.5"}, {"7", "0.5"}}}}, ramp, true);
-            std::string line = std::string("DIAG scale0tilt x ") + scale + ":";
-            for (size_t i = 0; i < out.pixels.size() && i < 48; i += 4) {
-                line += " " + std::to_string(out.pixels[i]) + "/" + std::to_string(out.pixels[i + 1]);
-            }
-            printf("%s\n", line.c_str());
-        }
-    }
     // Plugin defaults (a copy), nothing left in the image
     expectSame(profile, {{"frei0r.scale0tilt", {}}}, input, true);
     expectSame(profile, {{"frei0r.scale0tilt", {{"6", "1.2"}}}}, input, true);

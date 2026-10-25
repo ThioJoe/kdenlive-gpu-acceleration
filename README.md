@@ -92,7 +92,7 @@ MLT's module folder needs root.
 | Glow                                | `frei0r.glow`        | Identical output |
 | Soft Glow                           | `frei0r.softglow`    | Identical output |
 | Sharpen                             | `frei0r.sharpness`   | Identical output |
-| Scale and Tilt                      | `frei0r.scale0tilt`  | Identical output, see below |
+| Scale and Tilt                      | `frei0r.scale0tilt`  | Identical output, Linux only, see below |
 | Transform                           | `qtblend`            | Matches the CPU filter (QPainter): same alpha, colors within one level. Alpha blend compositing and 8-bit only, see below |
 | Track compositing                   | `qtblend` transition | Matches the CPU transition: same alpha, colors within one level, see below |
 | Dissolve, Luma (wipes), same-track mixes | `luma` transition | Identical output, see below |
@@ -130,6 +130,11 @@ its C code (which depend on where MLT's image lines start in memory: MLT
 aligns them to 16 bytes). Results narrower than 4 pixels stay on the CPU,
 where gavl draws them with values from memory it never wrote, and so do
 results that gavl draws past the end of the image's lines.
+
+This matches the Linux AppImage. Kdenlive's Windows build of the plugin and
+of gavl keeps more precision in some of the scaler's computations, which
+moves samples that fall exactly between two pixels (as many do when
+scaling by 1.5): on Windows, Scale and Tilt stays on the CPU.
 
 ### Transform
 

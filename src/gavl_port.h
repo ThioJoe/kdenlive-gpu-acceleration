@@ -11,6 +11,12 @@
  * down) and the order of its passes, ported so that the GPU kernels scale
  * with the same filters and positions. The scaling itself is in
  * gpufx_kernels.cu (gpufx_gavl_*).
+ *
+ * Where a sample falls exactly between two pixels, the rounding of these
+ * computations decides which pixels it takes. Kdenlive's Linux AppImage
+ * computes them in single precision as the source declares them, as this
+ * port does. Its Windows build keeps more precision for some of them, which
+ * moves such samples by a pixel: on Windows, scale0tilt stays on the CPU.
  */
 
 #pragma once
