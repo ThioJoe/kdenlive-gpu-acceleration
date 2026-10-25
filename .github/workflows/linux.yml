@@ -106,11 +106,16 @@ jobs:
           apt-get update -q
           apt-get install -y -q --no-install-recommends g++ cmake ninja-build qt6-base-dev libkf6config-dev libkf6configwidgets-dev > /dev/null
           dpkg-query -W g++ qt6-base-dev libkf6config-dev libkf6configwidgets-dev
+          # Kdenlive's libmlt-7.so in a folder of its own: in the folder of
+          # the AppImage's libraries, the linker would take the AppImage's Qt
+          # for the dependencies of Debian's KDE Frameworks
+          mkdir -p build-page-mlt
+          cp "$KDENLIVE_ROOT/usr/lib/libmlt-7.so.7" build-page-mlt/
           cmake -S source -B build-page -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DMLT_INCLUDE_DIR="$PWD/mlt/src" -DMLT_LIBRARY="$KDENLIVE_ROOT/usr/lib/libmlt-7.so.7"
+            -DMLT_INCLUDE_DIR="$PWD/mlt/src" -DMLT_LIBRARY="$PWD/build-page-mlt/libmlt-7.so.7"
           cmake --build build-page --target gpufx-settings gpufx-settings-selftest gpufx_settings_test
           install -D -m 755 build-page/gpufx/gpufx-settings.so dist/usr/lib/mlt-7/gpufx/gpufx-settings.so
-          chown -R "$HOST_IDS" build-page dist
+          chown -R "$HOST_IDS" build-page build-page-mlt dist
           EOF
           docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e HOST_IDS="$(id -u):$(id -g)" "$MODULE_IMAGE" bash -eo pipefail build-module.sh
           docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e HOST_IDS="$(id -u):$(id -g)" -e DEBIAN_FRONTEND=noninteractive "$PAGE_IMAGE" bash -eo pipefail build-page.sh
