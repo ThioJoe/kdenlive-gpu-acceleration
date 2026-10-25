@@ -387,12 +387,16 @@ jobs:
           # screenshot in screenshot/<name>
           test_kdenlive() {
             local name=$1 page=$2 status=0
+            # Folders of its own for each run, which the previous run, ended
+            # by the check, does not affect
+            local home="$PWD/kdenlive-home/$name"
+            export XDG_CONFIG_HOME="$home/config" XDG_DATA_HOME="$home/data" XDG_CACHE_HOME="$home/cache" XDG_STATE_HOME="$home/state"
+            mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
             # Settings of a Kdenlive that ran before: no first run wizard and
             # no welcome screen. Kdenlive's AppImage has a settings file of
             # its own.
-            mkdir -p ~/.config
             printf '%s\n' "[version]" "version=$KDENLIVE_VERSION" "" "[sdl]" "sdlAudioBackend=sdl2_audio" "" \
-              "[env]" "kdenliverendererpath=$root/usr/bin/kdenlive_render" "" "[startup]" "showWelcome=false" > ~/.config/kdenlive-appimagerc
+              "[env]" "kdenliverendererpath=$root/usr/bin/kdenlive_render" "" "[startup]" "showWelcome=false" > "$XDG_CONFIG_HOME/kdenlive-appimagerc"
             export GPUFX_SELFTEST_OUTPUT="$PWD/screenshot/$name"
             export GPUFX_SELFTEST_PAGE=$page
             mkdir -p "$GPUFX_SELFTEST_OUTPUT"
