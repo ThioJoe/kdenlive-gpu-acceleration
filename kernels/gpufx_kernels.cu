@@ -1555,3 +1555,113 @@ GPUFX_KERNEL void gpufx_luma_dissolve_yuyv(const gpufx_u32 *__restrict__ src, co
     out[2] = q[2];
     out[3] = q[3];
 }
+
+/* ==========================================================================
+ * gavl's video scaler (gavl 2.0.0, GPL-2.0-or-later, Members of the Gmerlin
+ * project) as frei0r's scale0tilt runs it on RGBA with its default options:
+ * the integer arithmetic of its x86 SIMD code, MMX for the horizontal pass
+ * and for vertical 2-tap filters, SSE2 for longer vertical filters with the
+ * C code for the bytes of a line the SIMD code leaves out. The filters and
+ * the passes come from gpufx/src/gavl_port.cpp.
+ * ========================================================================== */
+
+/* pmulhw */
+GPUFX_DEV int gpufx_mulhi16(int a, int b)
+{
+    return (int(gpufx_i16(a)) * int(gpufx_i16(b))) >> 16;
+}
+
+/* paddsw */
+GPUFX_DEV int gpufx_adds16(int a, int b)
+{
+    return gpufx_clamp(a + b, -32768, 32767);
+}
+
+/* Horizontal pass: rows rows of width output pixels, at (dstX, dstY) in dst,
+ * from the rows of src from srcRow on. index gives the first input pixel of
+ * every output pixel, factors its taps 14-bit coefficients. One thread per
+ * output pixel. */
+GPUFX_KERNEL void gpufx_gavl_scale_x(const gpufx_u8 *__restrict__ src, int srcStride, int srcRow, gpufx_u8 *__restrict__ dst, int dstStride, int dstX, int dstY,
+                                     int width, int rows, const int *__restrict__ index, const int *__restrict__ factors, int taps)
+{
+    const int x = GPUFX_GLOBAL_X;
+    const int y = GPUFX_GLOBAL_Y;
+    if (x >= width || y >= rows) {
+        return;
+    }
+    const gpufx_u8 *s = src + size_t(srcRow + y) * size_t(srcStride) + 4 * size_t(index[x]);
+    const int *f = factors + size_t(x) * size_t(taps);
+    gpufx_u8 *d = dst + size_t(dstY + y) * size_t(dstStride) + 4 * size_t(dstX + x);
+    for (int c = 0; c < 4; ++c) {
+        int r;
+        if (taps == 2) {
+            // scale_uint8_x_4_x_bilinear_mmx(): the difference of the two
+            // samples in 14 bits times the first coefficient
+            const int b = int(s[4 + c]) << 6;
+            int p = gpufx_mulhi16(gpufx_adds16(int(s[c]) << 6, -b), f[0]);
+            p = int(gpufx_i16(gpufx_u32(p) << 2));
+            r = gpufx_adds16(p, b) >> 6;
+        } else {
+            // scale_uint8_x_4_x_generic_mmx(), and _bicubic_ for 4 taps
+            int acc = 0;
+            for (int j = 0; j < taps; ++j) {
+                acc = int(gpufx_i16(acc + gpufx_mulhi16(int(s[4 * j + c]) << 7, f[j] & 0xffff)));
+            }
+            r = acc >> 5;
+        }
+        d[c] = gpufx_u8(gpufx_clamp(r, 0, 255));
+    }
+}
+
+/* Vertical pass: rows rows of width output pixels, at (dstX, dstY) in dst,
+ * from the columns of src from srcColumn on. index gives the first input row
+ * of every output row, factors its taps 14-bit coefficients. A 2-tap filter
+ * computes the bytes of a line in blocks of 8 with MMX
+ * (scale_uint8_x_4_y_bilinear_mmx()), the others in blocks of 16 with SSE2
+ * (scale_uint8_x_4_y_generic_sse2()) after lead bytes: the bytes outside the
+ * blocks go through the C code. One thread per output pixel. */
+GPUFX_KERNEL void gpufx_gavl_scale_y(const gpufx_u8 *__restrict__ src, int srcStride, int srcColumn, gpufx_u8 *__restrict__ dst, int dstStride, int dstX,
+                                     int dstY, int width, int rows, const int *__restrict__ index, const int *__restrict__ factors, int taps, int lead)
+{
+    const int x = GPUFX_GLOBAL_X;
+    const int y = GPUFX_GLOBAL_Y;
+    if (x >= width || y >= rows) {
+        return;
+    }
+    const gpufx_u8 *s = src + size_t(index[y]) * size_t(srcStride) + 4 * size_t(srcColumn + x);
+    const int *f = factors + size_t(y) * size_t(taps);
+    gpufx_u8 *d = dst + size_t(dstY + y) * size_t(dstStride) + 4 * size_t(dstX + x);
+    const int bytes = width * 4;
+    const int blocksEnd = taps == 2 ? bytes / 8 * 8 : lead + (bytes - lead) / 16 * 16;
+    const int blocksStart = taps == 2 ? 0 : lead;
+    for (int c = 0; c < 4; ++c) {
+        const int k = 4 * x + c;
+        int r;
+        if (k >= blocksStart && k < blocksEnd) {
+            int acc = 0;
+            for (int j = 0; j < taps; ++j) {
+                acc = gpufx_adds16(acc, gpufx_mulhi16(int(s[size_t(j) * size_t(srcStride) + size_t(c)]) << 7, f[j] & 0xffff));
+            }
+            r = acc >> 5;
+        } else {
+            int tmp = 0;
+            for (int j = 0; j < taps; ++j) {
+                tmp += f[j] * int(s[size_t(j) * size_t(srcStride) + size_t(c)]);
+            }
+            r = tmp >> 14;
+        }
+        d[c] = gpufx_u8(gpufx_clamp(r, 0, 255));
+    }
+}
+
+/* width x height pixels of src copied to (dstX, dstY) in dst */
+GPUFX_KERNEL void gpufx_gavl_copy(const gpufx_u32 *__restrict__ src, int srcWidth, gpufx_u32 *__restrict__ dst, int dstWidth, int dstX, int dstY, int width,
+                                  int height)
+{
+    const int x = GPUFX_GLOBAL_X;
+    const int y = GPUFX_GLOBAL_Y;
+    if (x >= width || y >= height) {
+        return;
+    }
+    dst[size_t(dstY + y) * size_t(dstWidth) + size_t(dstX + x)] = src[size_t(y) * size_t(srcWidth) + size_t(x)];
+}

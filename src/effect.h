@@ -213,6 +213,7 @@ const EffectDescriptor &frei0rSquareBlurEffect();
 const EffectDescriptor &frei0rGlowEffect();
 const EffectDescriptor &frei0rSoftGlowEffect();
 const EffectDescriptor &frei0rSharpnessEffect();
+const EffectDescriptor &frei0rScale0TiltEffect();
 const EffectDescriptor &transformEffect();
 const TransitionDescriptor &compositeTransition();
 const TransitionDescriptor &lumaTransition();

@@ -92,6 +92,7 @@ MLT's module folder needs root.
 | Glow                                | `frei0r.glow`        | Identical output |
 | Soft Glow                           | `frei0r.softglow`    | Identical output |
 | Sharpen                             | `frei0r.sharpness`   | Identical output |
+| Scale and Tilt                      | `frei0r.scale0tilt`  | Identical output, see below |
 | Transform                           | `qtblend`            | Matches the CPU filter (QPainter): same alpha, colors within one level. Alpha blend compositing and 8-bit only, see below |
 | Track compositing                   | `qtblend` transition | Matches the CPU transition: same alpha, colors within one level, see below |
 | Dissolve, Luma (wipes), same-track mixes | `luma` transition | Identical output, see below |
@@ -118,6 +119,17 @@ original CPU filter for that frame. frei0r effects always work in 8-bit RGBA;
 they stay on the CPU when their MLT `threads` property splits the frame in
 slices. An error that leaves the GPU in an unknown state turns GPU processing
 off for the rest of the session.
+
+### Scale and Tilt
+
+frei0r's Scale and Tilt plugin scales with gavl's video scaler. The GPU
+version reproduces it as Kdenlive's builds run it: the filters gavl builds
+(bilinear, widened when scaling down) and the integer arithmetic of its MMX
+and SSE2 code, including the bytes of each line that its SSE2 code leaves to
+its C code (which depend on where MLT's image lines start in memory: MLT
+aligns them to 16 bytes). Results narrower than 4 pixels stay on the CPU,
+where gavl draws them with values from memory it never wrote, and so do
+results that gavl draws past the end of the image's lines.
 
 ### Transform
 

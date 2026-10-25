@@ -9,6 +9,8 @@
  *    "frei0r.softglow" (Soft Glow), built on frei0r's square blur
  *    (include/frei0r/blur.h)
  *  - "frei0r.sharpness" (Sharpen), MPlayer's unsharp mask
+ *  - "frei0r.scale0tilt" (Scale and Tilt), which scales with gavl's video
+ *    scaler (see gavl_port.h)
  *
  * The parameters are read the way MLT passes them to the plugin
  * (process_frei0r_item() in frei0r_helper.c). The plugin code is the same in
@@ -17,6 +19,7 @@
  */
 
 #include "effect.h"
+#include "gavl_port.h"
 
 #include <algorithm>
 #include <array>
@@ -287,6 +290,114 @@ EffectPlan planSharpness(const EffectContext &ctx)
     return EffectPlan::gpu(std::move(job));
 }
 
+class Scale0TiltJob final : public EffectJob
+{
+public:
+    gavl::Scale0TiltParams params;
+
+    bool prepare(int inputWidth, int inputHeight) override { return gavl::scale0tiltPlan(params, inputWidth, inputHeight, m_plan); }
+
+    CUresult run(GpuScope &scope, int width, int height, CUdeviceptr in, CUdeviceptr out) override
+    {
+        using Plan = gavl::Scale0TiltPlan;
+        const Plan &p = m_plan;
+        const int stride = width * 4;
+        // f0r_update() clears the output first
+        CUresult res = scope.fill(out, 0, size_t(stride) * size_t(height));
+        if (res != CUDA_SUCCESS || p.kind == Plan::Empty) {
+            return res;
+        }
+        if (p.kind == Plan::Copy) {
+            return scope.launch2D(KernelId::gpufx_gavl_copy, p.dstWidth, p.dstHeight, 32, 8, in, width, out, width, p.dstX, p.dstY, p.dstWidth, p.dstHeight);
+        }
+        // The tables of both passes in one upload
+        std::vector<int> tables;
+        auto append = [&tables](const std::vector<int> &values) {
+            const size_t offset = tables.size() * sizeof(int);
+            tables.insert(tables.end(), values.begin(), values.end());
+            return offset;
+        };
+        const size_t hIndex = append(p.horizontal.index);
+        const size_t hFactors = append(p.horizontal.factors);
+        const size_t vIndex = append(p.vertical.index);
+        const size_t vFactors = append(p.vertical.factors);
+        const size_t tableBytes = tables.size() * sizeof(int);
+        const size_t bufferOffset = (tableBytes + 255) & ~size_t(255);
+        const size_t bufferStride = size_t(p.bufferWidth) * 4;
+        DeviceBuffer work;
+        res = work.allocate(bufferOffset + bufferStride * size_t(p.bufferHeight));
+        if (res == CUDA_SUCCESS) {
+            res = scope.upload(work.ptr(), tables.data(), tableBytes);
+        }
+        if (res != CUDA_SUCCESS) {
+            return res;
+        }
+        const CUdeviceptr buffer = work.ptr() + bufferOffset;
+        auto scaleX = [&](CUdeviceptr src, int srcStride, int srcRow, CUdeviceptr dst, int dstStride, int dstX, int dstY, int rows) {
+            return scope.launch2D(KernelId::gpufx_gavl_scale_x, p.dstWidth, rows, 32, 8, src, srcStride, srcRow, dst, dstStride, dstX, dstY, p.dstWidth, rows,
+                                  work.ptr() + hIndex, work.ptr() + hFactors, p.horizontal.taps);
+        };
+        auto scaleY = [&](CUdeviceptr src, int srcStride, int srcColumn, CUdeviceptr dst, int dstStride, int dstX, int dstY, int columns) {
+            return scope.launch2D(KernelId::gpufx_gavl_scale_y, columns, p.dstHeight, 32, 8, src, srcStride, srcColumn, dst, dstStride, dstX, dstY, columns,
+                                  p.dstHeight, work.ptr() + vIndex, work.ptr() + vFactors, p.vertical.taps, p.lead);
+        };
+        switch (p.kind) {
+        case Plan::ScaleX:
+            return scaleX(in, stride, 0, out, stride, p.dstX, p.dstY, p.dstHeight);
+        case Plan::ScaleY:
+            return scaleY(in, stride, 0, out, stride, p.dstX, p.dstY, p.dstWidth);
+        case Plan::XThenY:
+            res = scaleX(in, stride, p.firstRow, buffer, int(bufferStride), 0, 0, p.bufferHeight);
+            return res == CUDA_SUCCESS ? scaleY(buffer, int(bufferStride), 0, out, stride, p.dstX, p.dstY, p.dstWidth) : res;
+        case Plan::YThenX:
+            res = scaleY(in, stride, p.firstColumn, buffer, int(bufferStride), 0, 0, p.bufferWidth);
+            return res == CUDA_SUCCESS ? scaleX(buffer, int(bufferStride), 0, out, stride, p.dstX, p.dstY, p.dstHeight) : res;
+        default:
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+    }
+
+private:
+    gavl::Scale0TiltPlan m_plan;
+};
+
+EffectPlan planScale0Tilt(const EffectContext &ctx)
+{
+    // Slices of the frame would be scaled separately
+    if (slicedByMlt(ctx)) {
+        return EffectPlan::cpu();
+    }
+    // f0r_construct() defaults, and f0r_set_param_value()
+    auto job = std::make_unique<Scale0TiltJob>();
+    gavl::Scale0TiltParams &p = job->params;
+    double value = 0;
+    if (frei0rDouble(ctx, 0, "Clip left", value)) {
+        p.cl = value;
+    }
+    if (frei0rDouble(ctx, 1, "Clip right", value)) {
+        p.cr = value;
+    }
+    if (frei0rDouble(ctx, 2, "Clip top", value)) {
+        p.ct = value;
+    }
+    if (frei0rDouble(ctx, 3, "Clip bottom", value)) {
+        p.cb = value;
+    }
+    if (frei0rDouble(ctx, 4, "Scale X", value)) {
+        p.sx = value * 2.0;
+    }
+    if (frei0rDouble(ctx, 5, "Scale Y", value)) {
+        p.sy = value * 2.0;
+    }
+    if (frei0rDouble(ctx, 6, "Tilt X", value)) {
+        p.tx = value * 2.0 - 1.0;
+    }
+    if (frei0rDouble(ctx, 7, "Tilt Y", value)) {
+        p.ty = value * 2.0 - 1.0;
+    }
+    return EffectPlan::gpu(std::move(job));
+}
+
 } // namespace
 
 const EffectDescriptor &frei0rSquareBlurEffect()
@@ -310,6 +421,12 @@ const EffectDescriptor &frei0rSoftGlowEffect()
 const EffectDescriptor &frei0rSharpnessEffect()
 {
     static const EffectDescriptor descriptor{"frei0r.sharpness", false, planSharpness};
+    return descriptor;
+}
+
+const EffectDescriptor &frei0rScale0TiltEffect()
+{
+    static const EffectDescriptor descriptor{"frei0r.scale0tilt", false, planScale0Tilt};
     return descriptor;
 }
 

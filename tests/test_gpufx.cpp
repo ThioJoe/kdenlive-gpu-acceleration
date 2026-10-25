@@ -504,6 +504,38 @@ void testFrei0r(mlt_profile profile)
                 {"frei0r.sharpness", {{"Amount", "0.7"}, {"Size", "0=0;10=1"}, {"out", "10"}}},
                 {"frei0r.softglow", {{"blur", "0.05"}}}},
                input, false, 5);
+    // Scale and Tilt: scaled up (2-tap filters), down by up to 2 (4 taps) and
+    // further (wider filters), moved partly out of the image, cropped
+    const Image wide = makeImage(160, 90, 2);
+    for (const Image *image : {&input, &wide, &portrait}) {
+        for (const char *scale : {"0.5", "0.75", "0.37", "0.26", "0.1", "1.3"}) {
+            for (const char *tilt : {"0.5", "0.45", "0.71"}) {
+                expectSame(profile, {{"frei0r.scale0tilt", {{"4", scale}, {"5", scale}, {"6", tilt}, {"7", "0.5"}}}}, *image, true);
+            }
+        }
+        expectSame(profile, {{"frei0r.scale0tilt", {{"Scale X", "0.3"}, {"Scale Y", "0.8"}, {"Tilt X", "0.37"}, {"Tilt Y", "0.62"}}}}, *image, true);
+        expectSame(profile,
+                   {{"frei0r.scale0tilt", {{"0", "0.1"}, {"1", "0.2"}, {"2", "0.15"}, {"3", "0.05"}, {"4", "0.45"}, {"5", "0.55"}, {"6", "0.3"}, {"7", "0.6"}}}},
+                   *image, true);
+        expectSame(profile, {{"frei0r.scale0tilt", {{"4", "0.2"}, {"5", "0.6"}, {"6", "0.1"}, {"7", "0.95"}}}}, *image, true);
+    }
+    // Plugin defaults (a copy), nothing left in the image
+    expectSame(profile, {{"frei0r.scale0tilt", {}}}, input, true);
+    expectSame(profile, {{"frei0r.scale0tilt", {{"6", "1.2"}}}}, input, true);
+    expectSame(profile, {{"frei0r.scale0tilt", {{"4", "0.3"}, {"5", "0.004"}}}}, makeImage(31, 7, 3), true);
+    if (g_mock.active() && hasFilter("frei0r.scale0tilt")) {
+        // gavl draws results narrower than 4 pixels with values from memory
+        // it never wrote: left to the CPU, whose output then varies
+        g_mock.reset();
+        render(profile, {{"frei0r.scale0tilt", {{"4", "0.005"}, {"5", "0.3"}}}}, input, false);
+        check(g_mock.stats().launches == 0, "scale0tilt drew a result narrower than 4 pixels on the GPU");
+    }
+    // Kdenlive presets animate the scale and the tilt, next to other effects
+    expectSame(profile,
+               {{"frei0r.scale0tilt", {{"4", "0=0.4;10=0.5"}, {"5", "0=0.4;10=0.5"}, {"6", "0=0.55;10=0.5"}, {"7", "0=0.6;10=0.5"}, {"out", "10"}}},
+                {"brightness", {{"alpha", "0=0;10=1"}, {"out", "10"}}},
+                {"dropshadow", {{"radius", "4"}}}},
+               wide, false, 3);
     if (g_mock.active() && hasFilter("frei0r.squareblur")) {
         // MLT slices the frame when "threads" is set: left to the CPU. The
         // slices share one plugin instance, so the CPU result is not even

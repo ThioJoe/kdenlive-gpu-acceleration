@@ -124,6 +124,7 @@ QString fallbackName(const QString &key)
         {QStringLiteral("effect:frei0r.glow"), QStringLiteral("Glow")},
         {QStringLiteral("effect:frei0r.softglow"), QStringLiteral("Soft Glow")},
         {QStringLiteral("effect:frei0r.sharpness"), QStringLiteral("Sharpen")},
+        {QStringLiteral("effect:frei0r.scale0tilt"), QStringLiteral("Scale and Tilt")},
         {QStringLiteral("effect:qtblend"), QStringLiteral("Transform")},
         {QStringLiteral("transition:qtblend"), QStringLiteral("Composite and transform")},
         {QStringLiteral("transition:luma"), QStringLiteral("Dissolve, Luma")},

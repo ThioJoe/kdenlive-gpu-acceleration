@@ -142,6 +142,7 @@ add_library(mltgpufx MODULE
     src/effect_frei0r.cpp
     src/effect_luma.cpp
     src/effect_qtblend.cpp
+    src/gavl_port.cpp
     src/gpu_runtime.cpp
     src/module.cpp
     src/normalizers.cpp

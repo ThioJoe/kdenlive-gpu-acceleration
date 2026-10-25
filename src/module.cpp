@@ -382,7 +382,8 @@ const std::vector<const EffectDescriptor *> &effectRegistry()
 {
     static const std::vector<const EffectDescriptor *> effects = {
         &dropShadowEffect(),       &boxBlurEffect(),    &rectBlurEffect(),       &brightnessEffect(),      &liftGammaGainEffect(),
-        &frei0rSquareBlurEffect(), &frei0rGlowEffect(), &frei0rSoftGlowEffect(), &frei0rSharpnessEffect(), &transformEffect()};
+        &frei0rSquareBlurEffect(), &frei0rGlowEffect(), &frei0rSoftGlowEffect(), &frei0rSharpnessEffect(), &transformEffect(),
+        &frei0rScale0TiltEffect()};
     return effects;
 }
 
