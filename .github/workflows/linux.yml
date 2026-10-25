@@ -6,8 +6,8 @@
 # packages them laid out like the AppImage's content: copying the package's
 # usr folder into the folder of an extracted AppImage adds them.
 #
-# The build runs in an AlmaLinux 9 container with GCC 14 from gcc-toolset,
-# like Kdenlive's AppImage, so that the module needs no newer glibc or
+# The module is built in an AlmaLinux 9 container with GCC 14 from
+# gcc-toolset, like Kdenlive's AppImage, so that it needs no newer glibc or
 # libstdc++ than Kdenlive itself. The workflow uses no action but
 # actions/upload-artifact: the source is fetched with git.
 
@@ -31,8 +31,11 @@ env:
   # MLT headers to compile with. The module adapts to the version of the MLT
   # it is loaded into at runtime.
   MLT_HEADERS: v7.42.0
-  # The system the build runs in: the one Kdenlive's AppImage is built on
-  BUILD_IMAGE: almalinux:9
+  # The system the module is built in: the one Kdenlive's AppImage is built on
+  MODULE_IMAGE: almalinux:9
+  # The system the settings page is built in, which has Qt and KDE Frameworks
+  # 6 no newer than Kdenlive's (AlmaLinux 9 has no KDE Frameworks 6)
+  PAGE_IMAGE: debian:trixie
 
 jobs:
   linux:
@@ -73,36 +76,42 @@ jobs:
           fi
           chmod +x "$name"
           ./"$name" --appimage-extract > /dev/null
-          rm "$name"
           mv squashfs-root kdenlive
           test -f kdenlive/usr/lib/libmlt-7.so.7 || { echo "::error::$name has no usr/lib/libmlt-7.so.7"; exit 1; }
           echo "KDENLIVE_ROOT=$PWD/kdenlive" >> "$GITHUB_ENV"
+          echo "APPIMAGE=$PWD/$name" >> "$GITHUB_ENV"
 
-      # Qt and KDE Frameworks of AlmaLinux and EPEL for the settings page,
-      # which uses Kdenlive's own at runtime. The folder is mounted at the
-      # same path in the container, where the tests find the libraries they
-      # were linked to.
+      # The module and its tests in build, the settings page and its tests in
+      # build-page, both linked to Kdenlive's own libmlt-7.so, so that a
+      # function it does not have fails the build. The page uses Kdenlive's
+      # Qt and KDE Frameworks at runtime. The folder is mounted at the same
+      # path in the containers, where the tests find the libraries they were
+      # linked to.
       - name: Build
         run: |
-          cat > build-in-container.sh <<'EOF'
-          dnf install -y -q dnf-plugins-core epel-release
-          dnf config-manager --set-enabled crb
-          if ! dnf install -y -q gcc-toolset-14-gcc-c++ cmake ninja-build file qt6-qtbase-devel kf6-kconfig-devel kf6-kconfigwidgets-devel; then
-            dnf list --available 'kf6-kconfig*' 'qt6-qtbase*' 'gcc-toolset-1*-gcc-c++' || true
-            exit 1
-          fi
-          rpm -q gcc-toolset-14-gcc-c++ qt6-qtbase-devel kf6-kconfig-devel kf6-kconfigwidgets-devel
+          cat > build-module.sh <<'EOF'
+          dnf install -y -q gcc-toolset-14-gcc-c++ cmake ninja-build
           source /opt/rh/gcc-toolset-14/enable
-          # Linked to Kdenlive's own libmlt-7.so, so that a function it does
-          # not have fails the build
-          cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          g++ --version | head -n 1
+          cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGPUFX_SETTINGS_PAGE=OFF \
             -DMLT_INCLUDE_DIR="$PWD/mlt/src" -DMLT_LIBRARY="$KDENLIVE_ROOT/usr/lib/libmlt-7.so.7" -DGPUFX_MLT_MODULE_DIR=lib/mlt-7
           cmake --build build
           cmake --install build --prefix "$PWD/dist/usr"
           chown -R "$HOST_IDS" build dist
           EOF
-          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e HOST_IDS="$(id -u):$(id -g)" "$BUILD_IMAGE" bash -eo pipefail build-in-container.sh
-          test -f build/gpufx/gpufx-settings.so || { echo "::error::The settings page was not built"; exit 1; }
+          cat > build-page.sh <<'EOF'
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends g++ cmake ninja-build qt6-base-dev libkf6config-dev libkf6configwidgets-dev > /dev/null
+          dpkg-query -W g++ qt6-base-dev libkf6config-dev libkf6configwidgets-dev
+          cmake -S source -B build-page -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DMLT_INCLUDE_DIR="$PWD/mlt/src" -DMLT_LIBRARY="$KDENLIVE_ROOT/usr/lib/libmlt-7.so.7"
+          cmake --build build-page --target gpufx-settings gpufx-settings-selftest gpufx_settings_test
+          install -D -m 755 build-page/gpufx/gpufx-settings.so dist/usr/lib/mlt-7/gpufx/gpufx-settings.so
+          chown -R "$HOST_IDS" build-page dist
+          EOF
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e HOST_IDS="$(id -u):$(id -g)" "$MODULE_IMAGE" bash -eo pipefail build-module.sh
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e HOST_IDS="$(id -u):$(id -g)" -e DEBIAN_FRONTEND=noninteractive "$PAGE_IMAGE" bash -eo pipefail build-page.sh
+          test -f build-page/gpufx/gpufx-settings.so || { echo "::error::The settings page was not built"; exit 1; }
 
       - name: Check the module's dependencies
         run: |
@@ -124,7 +133,7 @@ jobs:
           status=0
           for prefix in GLIBC GLIBCXX CXXABI; do
             theirs=$(xargs -a kdenlive-elf.txt objdump -T 2>/dev/null | grep -oE "\b${prefix}_[0-9.]+" | sort -Vu | tail -n 1)
-            for file in build/libmltgpufx.so build/gpufx/gpufx-settings.so; do
+            for file in build/libmltgpufx.so build-page/gpufx/gpufx-settings.so; do
               ours=$(objdump -T "$file" | grep -oE "\b${prefix}_[0-9.]+" | sort -Vu | tail -n 1)
               echo "$(basename "$file"): $prefix ${ours:-none}, Kdenlive's files: $theirs"
               if [ -n "$ours" ] && [ "$(printf '%s\n%s\n' "$ours" "$theirs" | sort -V | tail -n 1)" != "$theirs" ]; then
@@ -150,9 +159,9 @@ jobs:
             printf '%-45s %10s %s\n' "${file#"$root"/}" "$(stat -c %s "$file")" "$(sha256sum "$file" | cut -c 1-16)"
           done
 
-      # The page is built with AlmaLinux's Qt and KDE Frameworks but runs with
-      # Kdenlive's, which can be older: every function it uses from them must
-      # be in Kdenlive's libraries.
+      # The page is built with Debian's Qt and KDE Frameworks but runs with
+      # Kdenlive's: every function it uses from them must be in Kdenlive's
+      # libraries.
       - name: Check the settings page against Kdenlive's libraries
         run: |
           lib="$KDENLIVE_ROOT/usr/lib"
@@ -187,8 +196,8 @@ jobs:
             fi
             return $status
           }
-          check_imports build/gpufx/gpufx-settings.so
-          check_imports build/tests/gpufx_settings_test
+          check_imports build-page/gpufx/gpufx-settings.so
+          check_imports build-page/tests/gpufx_settings_test
 
       # Libraries that Kdenlive takes from the system, which GitHub's runner
       # lacks, and a virtual screen for Kdenlive
@@ -211,12 +220,12 @@ jobs:
           # usr/lib/mlt-7, the module loads the page from usr/lib/mlt-7/gpufx
           cp build/libmltgpufx.so "$root/usr/lib/mlt-7/"
           mkdir -p "$root/usr/lib/mlt-7/gpufx"
-          cp build/gpufx/gpufx-settings.so "$root/usr/lib/mlt-7/gpufx/"
+          cp build-page/gpufx/gpufx-settings.so "$root/usr/lib/mlt-7/gpufx/"
           # From usr/bin, with the environment Kdenlive's AppRun sets, MLT
           # finds its modules, data and frei0r plugins as it does for Kdenlive,
           # and Qt finds Kdenlive's plugins and data. The tests find Kdenlive's
           # libraries through LD_LIBRARY_PATH.
-          cp build/tests/gpufx_test build/tests/gpufx_settings_test "$root/usr/bin/"
+          cp build/tests/gpufx_test build-page/tests/gpufx_settings_test "$root/usr/bin/"
           this_dir=$root
           source "$root/apprun-hooks/craft-runenv-hook.sh"
           export LD_LIBRARY_PATH="$root/usr/lib"
@@ -270,6 +279,18 @@ jobs:
           EOF
           find dist -type f
 
+      # The install script, with the package zipped as it is downloaded,
+      # instead of a release: it extracts the AppImage and adds the files
+      - name: Install with Tools/install-gpufx.sh
+        run: |
+          (cd dist && zip -q -r ../package.zip .)
+          source/Tools/install-gpufx.sh "$APPIMAGE" --package package.zip --dest install-test/kdenlive | tee install.log
+          grep -qx "Kdenlive $KDENLIVE_VERSION" install.log || { echo "::error::The install script did not find Kdenlive $KDENLIVE_VERSION"; exit 1; }
+          cmp dist/usr/lib/mlt-7/libmltgpufx.so install-test/kdenlive/usr/lib/mlt-7/libmltgpufx.so
+          cmp dist/usr/lib/mlt-7/gpufx/gpufx-settings.so install-test/kdenlive/usr/lib/mlt-7/gpufx/gpufx-settings.so
+          diff -r -q kdenlive install-test/kdenlive | grep -v -E 'gpufx|gpufx_test|gpufx_settings_test' || true
+          rm -rf install-test package.zip
+
       # Downloaded as a zip of the dist folder: the README and the usr folder
       - name: Upload the package
         uses: actions/upload-artifact@v4
@@ -287,7 +308,7 @@ jobs:
         continue-on-error: true
         run: |
           root=$KDENLIVE_ROOT
-          cp build/gpufx/gpufx-settings-selftest.so "$root/usr/lib/mlt-7/gpufx/gpufx-settings.so"
+          cp build-page/gpufx/gpufx-settings-selftest.so "$root/usr/lib/mlt-7/gpufx/gpufx-settings.so"
           export GPUFX_CUDA_LIBRARY="$PWD/build/tests/libgpufx_mockcuda.so"
           # Runs Kdenlive with the check, which saves its report and
           # screenshot in screenshot/<name>
@@ -314,7 +335,7 @@ jobs:
           # failure comes from the page or from Kdenlive on the runner
           with=$(test_kdenlive with-page 1)
           without=$(test_kdenlive without-page 0)
-          cp build/gpufx/gpufx-settings.so "$root/usr/lib/mlt-7/gpufx/gpufx-settings.so"
+          cp build-page/gpufx/gpufx-settings.so "$root/usr/lib/mlt-7/gpufx/gpufx-settings.so"
           echo "with the page: $with"
           echo "without the page: $without"
           if [ "$with" != "exit code 0" ]; then
