@@ -608,7 +608,7 @@ int patternGetFrame(mlt_producer producer, mlt_frame_ptr frame, int)
     mlt_properties properties = MLT_FRAME_PROPERTIES(*frame);
     auto *pattern = static_cast<const Image *>(mlt_properties_get_data(MLT_PRODUCER_PROPERTIES(producer), "_pattern", nullptr));
     mlt_properties_set_data(properties, "_pattern", const_cast<Image *>(pattern), 0, nullptr, nullptr);
-    mlt_properties_set_int(properties, "format", mlt_image_rgba);
+    mlt_properties_set_int(properties, "format", mlt_properties_get_int(MLT_PRODUCER_PROPERTIES(producer), "_format"));
     mlt_properties_set_int(properties, "width", pattern->width);
     mlt_properties_set_int(properties, "height", pattern->height);
     mlt_properties_set_int(properties, "meta.media.width", pattern->width);
@@ -628,13 +628,16 @@ void patternClose(mlt_producer producer)
     free(producer);
 }
 
-mlt_producer patternProducer(mlt_profile profile, const Image *pattern)
+/** A producer of the image. Its frames announce declaredFormat before their
+ *  image is fetched, as video producers announce their decoded format. */
+mlt_producer patternProducer(mlt_profile profile, const Image *pattern, mlt_image_format declaredFormat = mlt_image_rgba)
 {
     mlt_producer producer = mlt_producer_new(profile);
     producer->get_frame = patternGetFrame;
     producer->close = reinterpret_cast<mlt_destructor>(patternClose);
     producer->close_object = producer;
     mlt_properties_set_data(MLT_PRODUCER_PROPERTIES(producer), "_pattern", const_cast<Image *>(pattern), 0, nullptr, nullptr);
+    mlt_properties_set_int(MLT_PRODUCER_PROPERTIES(producer), "_format", declaredFormat);
     mlt_properties_set_position(MLT_PRODUCER_PROPERTIES(producer), "length", 100);
     mlt_properties_set_position(MLT_PRODUCER_PROPERTIES(producer), "out", 99);
     return producer;
@@ -1218,20 +1221,28 @@ void testYuvOutput(mlt_profile profile)
     if (hasFilter("qtblend") || mlt_properties_get_data(mlt_repository_transitions(mlt_factory_repository()), "qtblend", nullptr)) {
         const Image bottom = makeImage(profile->width, profile->height, 1);
         const Image top = makeImage(profile->width, profile->height, 3);
-        auto renderYuv = [&](bool cpu) {
+        // rect: the transition's, none for Kdenlive's track compositing
+        auto renderYuv = [&](bool cpu, const std::vector<FilterSpec> &topFilters, const char *rect, mlt_image_format topFormat) {
             Output output;
             mlt_tractor tractor = mlt_tractor_new();
             mlt_multitrack multitrack = mlt_tractor_multitrack(tractor);
             mlt_field field = mlt_tractor_field(tractor);
-            mlt_producer producers[2] = {patternProducer(profile, &bottom), patternProducer(profile, &top)};
-            mlt_filter converter = mlt_factory_filter(profile, "avcolor_space", nullptr);
-            mlt_producer_attach(producers[0], converter);
+            mlt_producer producers[2] = {patternProducer(profile, &bottom), patternProducer(profile, &top, topFormat)};
+            // Both clips get the converter, as MLT's loader attaches it
+            mlt_filter converters[2] = {mlt_factory_filter(profile, "avcolor_space", nullptr), mlt_factory_filter(profile, "avcolor_space", nullptr)};
+            std::vector<mlt_filter> filters = createFilters(profile, topFilters, cpu);
+            mlt_producer_attach(producers[0], converters[0]);
+            mlt_producer_attach(producers[1], converters[1]);
+            for (mlt_filter filter : filters) {
+                mlt_producer_attach(producers[1], filter);
+            }
             mlt_multitrack_connect(multitrack, producers[0], 0);
             mlt_multitrack_connect(multitrack, producers[1], 1);
             mlt_transition transition = mlt_factory_transition(profile, "qtblend", nullptr);
             mlt_properties_set_int(MLT_TRANSITION_PROPERTIES(transition), "always_active", 1);
-            // Moved and faded, without scaling, which MLT 7.38 does with QImage::scaled() on the CPU
-            mlt_properties_set(MLT_TRANSITION_PROPERTIES(transition), "rect", "12 -7 160 90 0.6");
+            if (rect) {
+                mlt_properties_set(MLT_TRANSITION_PROPERTIES(transition), "rect", rect);
+            }
             mlt_properties_set_int(MLT_TRANSITION_PROPERTIES(transition), "_gpufx.disable", cpu ? 1 : 0);
             mlt_field_plant_transition(field, transition, 0, 1);
             mlt_frame frame = nullptr;
@@ -1242,19 +1253,51 @@ void testYuvOutput(mlt_profile profile)
             }
             mlt_transition_close(transition);
             mlt_tractor_close(tractor);
-            mlt_filter_close(converter);
+            for (mlt_filter filter : filters) {
+                mlt_filter_close(filter);
+            }
+            mlt_filter_close(converters[0]);
+            mlt_filter_close(converters[1]);
             mlt_producer_close(producers[0]);
             mlt_producer_close(producers[1]);
             return output;
         };
+        // Moved and faded, without scaling, which MLT 7.38 does with QImage::scaled() on the CPU
+        const char *const moved = "12 -7 160 90 0.6";
         g_mock.reset();
-        const Output gpu = renderYuv(false);
+        const Output gpu = renderYuv(false, {}, moved, mlt_image_rgba);
         const MockCudaStats stats = g_mock.stats();
-        const Output cpu = renderYuv(true);
+        const Output cpu = renderYuv(true, {}, moved, mlt_image_rgba);
         expectSameOutput(cpu, gpu, "yuv422 output of compositing", 1);
         if (g_mock.active()) {
             const uint64_t pixels = uint64_t(profile->width) * uint64_t(profile->height);
             check(stats.downloadedBytes == pixels * 3, "yuv422 output of compositing: %llu bytes downloaded", (unsigned long long)stats.downloadedBytes);
+        }
+        // Effects on a video clip on the top track, composited without a
+        // rectangle: the transition first asks for the top image in YUV,
+        // which the effects must deliver for real rather than leave on the GPU
+        struct TopCase
+        {
+            const char *what;
+            std::vector<FilterSpec> filters;
+        };
+        const TopCase topCases[] = {
+            {"Transform", {{"qtblend", {{"rect", "20 10 100 56 1"}}}}},
+            {"Transform and drop shadow", {{"qtblend", {{"rect", "20 10 100 56 1"}, {"rotation", "8"}}}, {"dropshadow", {{"radius", "3"}}}}},
+            {"opaque blur", {{"box_blur", {{"hradius", "3"}, {"vradius", "2"}}}}},
+        };
+        for (const TopCase &c : topCases) {
+            if (!hasFilters(c.filters)) {
+                continue;
+            }
+            const std::string what = std::string("yuv422 output of compositing, ") + c.what + " on the top clip";
+            g_mock.reset();
+            const Output gpuTop = renderYuv(false, c.filters, nullptr, mlt_image_yuv420p);
+            const uint64_t launches = g_mock.stats().launches;
+            expectSameOutput(renderYuv(true, c.filters, nullptr, mlt_image_yuv420p), gpuTop, what, 1);
+            if (g_mock.active()) {
+                check(launches > 0, "%s: nothing ran on the GPU", what.c_str());
+            }
         }
     }
 }

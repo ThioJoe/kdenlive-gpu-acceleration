@@ -180,6 +180,13 @@ void attachDeviceImage(mlt_properties properties, std::unique_ptr<DeviceImage> i
  *  on frame, for takeDeviceImage(). */
 int fetchImage(mlt_frame frame, mlt_frame source, uint8_t **image, mlt_image_format *format, int *width, int *height, int writable)
 {
+    if (*format != mlt_image_rgba) {
+        // The host image standing for a GPU image is not filled, and MLT
+        // would convert it to the format asked for (the qtblend transition
+        // asks for the consumer's format when it may only pass the top image
+        // on): the bridge delivers a real image in that format instead.
+        source = nullptr;
+    }
     if (source) {
         mlt_properties_set_int(MLT_FRAME_PROPERTIES(source), kWantDevice, 1);
     }
