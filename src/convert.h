@@ -48,6 +48,17 @@ CUresult convertYuv420ToRgba(GpuScope &scope, const Yuv420Image &image, DeviceBu
  *  be even. Synchronizes the stream. */
 CUresult convertRgbaToYuv422(GpuScope &scope, CUdeviceptr rgba, int width, int height, int colorspace, bool fullRange, uint8_t *yuv422, uint8_t *alpha);
 
+/** True if convertRgbaToYuv420() converts an image of this size. */
+bool convertsRgbaToYuv420(int width, int height);
+
+/** Converts an RGBA image on the GPU to planar 4:2:0 YUV, 8-bit
+ *  (mlt_image_yuv420p) or 10-bit (mlt_image_yuv420p10), as MLT's
+ *  avcolour_space does (sws_scale() with SWS_BICUBIC | SWS_ACCURATE_RND |
+ *  SWS_FULL_CHR_H_INT), limited range, and downloads it with its alpha
+ *  channel when alpha is not null. colorspace is the mlt_colorspace of the
+ *  output. Synchronizes the stream. */
+CUresult convertRgbaToYuv420(GpuScope &scope, CUdeviceptr rgba, int width, int height, int colorspace, bool tenBit, uint8_t *yuv, uint8_t *alpha);
+
 /** Converts an RGBA image on the GPU to packed 4:2:2 YUV and back to RGBA, as
  *  MLT's avcolour_space does when an RGBA image is asked for in YUV 4:2:2 and
  *  then converted back: to limited range YUV in colorspace as

@@ -964,7 +964,10 @@ Output fetchOutput(mlt_frame frame, mlt_image_format format, int width, int heig
     output.height = height;
     output.format = format;
     const size_t pixels = size_t(width) * size_t(height);
-    output.data.assign(image, image + pixels * (format == mlt_image_rgba ? 4 : format == mlt_image_yuv422 ? 2 : 0));
+    const size_t bytes = format == mlt_image_rgba ? pixels * 4 : format == mlt_image_yuv422 ? pixels * 2 : format == mlt_image_yuv420p ? pixels * 3 / 2
+                                                                                   : format == mlt_image_yuv420p10 ? pixels * 3
+                                                                                                                   : 0;
+    output.data.assign(image, image + bytes);
     int alphaSize = 0;
     uint8_t *alpha = mlt_frame_get_alpha_size(frame, &alphaSize);
     if (alpha && size_t(alphaSize) >= pixels) {
@@ -1521,6 +1524,47 @@ void testYuvOutput(mlt_profile profile)
             const uint64_t expected = c.onGpu ? pixels * 3 : pixels * 4;
             check(stats.downloadedBytes == expected, "%s: %llu bytes downloaded, expected %llu", what.c_str(), (unsigned long long)stats.downloadedBytes,
                   (unsigned long long)expected);
+        }
+    }
+
+    // Planar 4:2:0, which a consumer with mlt_image_format=yuv420p or
+    // yuv420p10 asks for
+    struct Case420
+    {
+        int width, height, pattern, colorspace;
+        Properties frame;
+        bool onGpu;
+    };
+    const Case420 cases420[] = {
+        {160, 90, 1, 709, {}, true},
+        {96, 54, 3, 601, {}, true},
+        {98, 56, 0, 2020, {}, true},
+        {160, 90, 2, 240, {}, true},
+        {160, 90, 4, 709, {{"consumer.color_range", "full"}}, false},
+        // Odd heights stay with the CPU conversion
+        {96, 55, 2, 709, {}, false},
+    };
+    for (mlt_image_format format : {mlt_image_yuv420p, mlt_image_yuv420p10}) {
+        for (const Case420 &c : cases420) {
+            profile->colorspace = c.colorspace;
+            const Image input = makeImage(c.width, c.height, c.pattern);
+            g_mock.reset();
+            const Output gpu = renderFormat(profile, blur, input, false, format, c.frame);
+            const MockCudaStats stats = g_mock.stats();
+            const Output cpu = renderFormat(profile, blur, input, true, format, c.frame);
+            std::string what = std::string(mlt_image_format_name(format)) + " output " + std::to_string(c.width) + "x" + std::to_string(c.height) +
+                               " colorspace " + std::to_string(c.colorspace);
+            for (const auto &property : c.frame) {
+                what += std::string(", ") + property.first + "=" + property.second;
+            }
+            expectSameOutput(cpu, gpu, what);
+            if (g_mock.active()) {
+                // The YUV planes and the alpha plane, or RGBA
+                const uint64_t pixels = uint64_t(c.width) * uint64_t(c.height);
+                const uint64_t expected = !c.onGpu ? pixels * 4 : format == mlt_image_yuv420p ? pixels * 5 / 2 : pixels * 4;
+                check(stats.downloadedBytes == expected && stats.downloads == (c.onGpu ? 2u : 1u), "%s: %llu bytes downloaded in %llu downloads, expected %llu",
+                      what.c_str(), (unsigned long long)stats.downloadedBytes, (unsigned long long)stats.downloads, (unsigned long long)expected);
+            }
         }
     }
     profile->colorspace = colorspace;

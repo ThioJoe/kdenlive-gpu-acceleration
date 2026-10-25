@@ -1315,3 +1315,61 @@ GPUFX_KERNEL void gpufx_sws_scale_rgba_v(const gpufx_i16 *__restrict__ planes, i
     }
     dst[size_t(y) * size_t(width) + size_t(x)] = gpufx_pack(gpufx_u32(R >> 22), gpufx_u32(G >> 22), gpufx_u32(B >> 22), gpufx_u32(A) & 0xFFu);
 }
+
+/* RGBA to planar 4:2:0 YUV, 8-bit (yuv420p) or 10-bit (yuv420p10le), as
+ * MLT's avcolour_space converts it (sws_scale() with SWS_BICUBIC,
+ * SWS_ACCURATE_RND and SWS_FULL_CHR_H_INT, same size): the 15-bit values of
+ * gpufx_sws_rgba_luma() and gpufx_sws_rgba_chroma() (the chroma of two
+ * neighbouring pixels), luma written by yuv2plane1_8_c() or
+ * yuv2plane1_10_c(), chroma filtered vertically by the bicubic filter of
+ * sws_port.cpp and written by yuv2planeX_8_c() or yuv2planeX_10_c(). One
+ * thread per 2x2 block, the width and height must be even. dst holds the
+ * three planes one after the other, alpha (if not null) the alpha channel. */
+GPUFX_KERNEL void gpufx_rgba_to_yuv420(const gpufx_u32 *__restrict__ src, gpufx_u8 *__restrict__ dst, gpufx_u8 *__restrict__ alpha, int w, int h,
+                                       int tenBit, const gpufx_i16 *__restrict__ chromaFilter, const int *__restrict__ chromaPos, int chromaSize, int ry,
+                                       int gy, int by, int ru, int gu, int bu, int rv, int gv, int bv)
+{
+    const int cx = GPUFX_GLOBAL_X;
+    const int cy = GPUFX_GLOBAL_Y;
+    const int cw = w / 2;
+    const int ch = h / 2;
+    if (cx >= cw || cy >= ch) {
+        return;
+    }
+    const size_t lumaSize = size_t(w) * size_t(h);
+    const size_t chromaSizeBytes = size_t(cw) * size_t(ch);
+    for (int dy = 0; dy < 2; ++dy) {
+        for (int dx = 0; dx < 2; ++dx) {
+            const size_t index = size_t(2 * cy + dy) * size_t(w) + size_t(2 * cx + dx);
+            const gpufx_u32 px = src[index];
+            const int y15 = gpufx_sws_rgba_luma(px, ry, gy, by);
+            if (tenBit) {
+                reinterpret_cast<gpufx_u16 *>(dst)[index] = gpufx_u16(gpufx_clamp((y15 + (1 << 4)) >> 5, 0, 1023));
+            } else {
+                dst[index] = gpufx_u8(gpufx_clamp((y15 + 64) >> 7, 0, 255));
+            }
+            if (alpha) {
+                alpha[index] = gpufx_u8(px >> 24);
+            }
+        }
+    }
+    int u = tenBit ? 1 << 16 : 64 << 12;
+    int v = u;
+    const gpufx_i16 *filter = chromaFilter + cy * chromaSize;
+    for (int j = 0; j < chromaSize; ++j) {
+        const int row = gpufx_min(chromaPos[cy] + j, h - 1);
+        const gpufx_u32 p0 = src[size_t(row) * size_t(w) + size_t(2 * cx)];
+        const gpufx_u32 p1 = src[size_t(row) * size_t(w) + size_t(2 * cx + 1)];
+        u += gpufx_sws_rgba_chroma(p0, p1, ru, gu, bu) * filter[j];
+        v += gpufx_sws_rgba_chroma(p0, p1, rv, gv, bv) * filter[j];
+    }
+    const size_t c = size_t(cy) * size_t(cw) + size_t(cx);
+    if (tenBit) {
+        gpufx_u16 *planes = reinterpret_cast<gpufx_u16 *>(dst);
+        planes[lumaSize + c] = gpufx_u16(gpufx_clamp(u >> 17, 0, 1023));
+        planes[lumaSize + chromaSizeBytes + c] = gpufx_u16(gpufx_clamp(v >> 17, 0, 1023));
+    } else {
+        dst[lumaSize + c] = gpufx_u8(gpufx_clamp(u >> 19, 0, 255));
+        dst[lumaSize + chromaSizeBytes + c] = gpufx_u8(gpufx_clamp(v >> 19, 0, 255));
+    }
+}

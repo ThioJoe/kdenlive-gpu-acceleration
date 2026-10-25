@@ -185,6 +185,13 @@ back to YUV.
   `avcolor_space` filter, the GPU converts the result and only the YUV image
   (and its alpha channel) is downloaded. This also lets compositing and
   lightweight effects run on the GPU when nothing else of the frame is there.
+  A render profile can ask for planar 4:2:0 instead, the format of most
+  codecs, with `mlt_image_format=yuv420p` among its parameters
+  (`mlt_image_format=yuv420p10` for 10-bit codecs, with `pix_fmt=p010le` or
+  `yuv420p10le`): the GPU then converts to that format, and the encoder only
+  copies it, instead of converting 4:2:2 on its own thread. The result is
+  what MLT gives with that setting on the CPU, which subsamples the colors
+  straight from RGBA rather than through 4:2:2.
 * **Round trip through YUV**: compositing without a rectangle (Kdenlive's
   track compositing) first asks for the top track's image in the output
   format, and converts a YUV image with an alpha channel straight back to
@@ -220,8 +227,10 @@ coefficients, chroma sampling positions and rounding are ported in
 handles (BT.601, BT.709, BT.2020, SMPTE 240M), limited and full range video,
 and MLT's field by field conversion of interlaced video. This was checked
 against libswscale of FFmpeg 6.1, 7.1 and 8.0, with and without its SIMD
-code (the scaling against 7.1 and 8.0 with their SIMD code, after comparing
-the code it uses in 6.1, 7.1 and 8.0). One exception: FFmpeg 8.0 rounds the conversion to full range YUV
+code (the scaling and the 4:2:0 output against 7.1 and 8.0 with their SIMD
+code, after comparing the code they use in 6.1, 7.1 and 8.0). Images
+narrower than 8 pixels keep the CPU conversion to 4:2:0: for those,
+libswscale writes past the end of the chroma planes. One exception: FFmpeg 8.0 rounds the conversion to full range YUV
 differently from older versions, so a full range output (a consumer with
 `color_range=full`, not Kdenlive's default) keeps the CPU conversion.
 

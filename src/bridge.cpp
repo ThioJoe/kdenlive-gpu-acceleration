@@ -367,11 +367,16 @@ void *avcolourConverter()
     return converter;
 }
 
-/** True if the RGBA result can be delivered as the YUV 4:2:2 image the caller
- *  asked for, converted on the GPU. */
-bool deliversYuv422(mlt_frame frame, mlt_image_format requested, int width, int height)
+/** True if the RGBA result can be delivered as the YUV image the caller asked
+ *  for, converted on the GPU: packed 4:2:2 (as consumers ask for by
+ *  default), or planar 4:2:0 in 8 or 10 bits (for a consumer with
+ *  mlt_image_format=yuv420p or yuv420p10). */
+bool deliversYuv(mlt_frame frame, mlt_image_format requested, int width, int height)
 {
-    if (requested != mlt_image_yuv422 || width <= 0 || height <= 0 || (width & 1) || !serviceEnabled("conversion", "avcolor_space")) {
+    if (width <= 0 || height <= 0 || (width & 1) || !serviceEnabled("conversion", "avcolor_space")) {
+        return false;
+    }
+    if (requested != mlt_image_yuv422 && ((requested != mlt_image_yuv420p && requested != mlt_image_yuv420p10) || !convertsRgbaToYuv420(width, height))) {
         return false;
     }
     mlt_properties properties = MLT_FRAME_PROPERTIES(frame);
@@ -389,21 +394,24 @@ bool deliversYuv422(mlt_frame frame, mlt_image_format requested, int width, int 
     return converter && converter == avcolourConverter();
 }
 
-/** Converts the RGBA result to YUV 4:2:2 on the GPU and makes it the frame
- *  image, with the frame properties avcolour_space would set. */
-CUresult deliverYuv422(GpuScope &scope, CUdeviceptr rgba, mlt_frame frame, int width, int height, uint8_t **image, mlt_image_format *format, int *outWidth,
-                       int *outHeight)
+/** Converts the RGBA result to the YUV format the caller asked for (see
+ *  deliversYuv()) on the GPU and makes it the frame image, with the frame
+ *  properties avcolour_space would set. */
+CUresult deliverYuv(GpuScope &scope, CUdeviceptr rgba, mlt_frame frame, int width, int height, mlt_image_format requested, uint8_t **image,
+                    mlt_image_format *format, int *outWidth, int *outHeight)
 {
     mlt_properties properties = MLT_FRAME_PROPERTIES(frame);
     mlt_producer producer = mlt_frame_get_original_producer(frame);
     mlt_profile profile = producer ? mlt_service_profile(MLT_PRODUCER_SERVICE(producer)) : nullptr;
     const int colorspace = profile ? profile->colorspace : mlt_colorspace_bt601;
-    const int fullRange = 0; // see deliversYuv422()
-    const int size = width * height * 2;
+    const int fullRange = 0; // see deliversYuv()
+    const int size = requested == mlt_image_yuv422 ? width * height * 2 : requested == mlt_image_yuv420p ? width * height * 3 / 2 : width * height * 3;
     const int alphaSize = width * height;
     auto *yuv = allocateImage(size_t(size));
     auto *alpha = allocateImage(size_t(alphaSize));
-    CUresult res = yuv && alpha ? convertRgbaToYuv422(scope, rgba, width, height, colorspace, fullRange, yuv, alpha) : CUDA_ERROR_OUT_OF_MEMORY;
+    CUresult res = !yuv || !alpha                    ? CUDA_ERROR_OUT_OF_MEMORY
+                   : requested == mlt_image_yuv422 ? convertRgbaToYuv422(scope, rgba, width, height, colorspace, fullRange, yuv, alpha)
+                                                   : convertRgbaToYuv420(scope, rgba, width, height, colorspace, requested == mlt_image_yuv420p10, yuv, alpha);
     if (res != CUDA_SUCCESS) {
         releaseImage(yuv);
         releaseImage(alpha);
@@ -413,21 +421,21 @@ CUresult deliverYuv422(GpuScope &scope, CUdeviceptr rgba, mlt_frame frame, int w
     mlt_frame_set_image(frame, yuv, size, releaseImage);
     mlt_properties_set_int(properties, "colorspace", colorspace);
     mlt_properties_set_int(properties, "full_range", fullRange);
-    mlt_properties_set_int(properties, "format", mlt_image_yuv422);
+    mlt_properties_set_int(properties, "format", requested);
     mlt_properties_set_int(properties, "width", width);
     mlt_properties_set_int(properties, "height", height);
     *image = yuv;
-    *format = mlt_image_yuv422;
+    *format = requested;
     *outWidth = width;
     *outHeight = height;
     return CUDA_SUCCESS;
 }
 
-/** deliverYuv422() for a caller that converts the YUV image straight back to
+/** deliverYuv() to YUV 4:2:2 for a caller that converts the YUV image straight back to
  *  RGBA (kYuvRoundTrip), as MLT's qtblend transition does with a top image
  *  that has an alpha plane: the RGBA result stays on the GPU and the caller
  *  does both conversions there. The host image is a YUV 4:2:2 image that only
- *  stands for the GPU one, with the frame properties of deliverYuv422(). */
+ *  stands for the GPU one, with the frame properties of deliverYuv(). */
 CUresult deliverYuv422Later(GpuScope &scope, DeviceBuffer &rgba, mlt_frame frame, int width, int height, uint8_t **image, mlt_image_format *format,
                             int *outWidth, int *outHeight)
 {
@@ -558,13 +566,17 @@ int runOnGpu(mlt_frame frame, mlt_filter filter, mlt_get_image cpuGetImage, cons
                         logDebug("%s: %dx%d on GPU, kept on GPU", effect.service, outW, outH);
                         return 0;
                     }
-                } else if (deliversYuv422(frame, requestedFormat, outW, outH)) {
-                    res = yuvRoundTrip ? deliverYuv422Later(scope, out, frame, outW, outH, image, format, width, height)
-                                       : deliverYuv422(scope, out.ptr(), frame, outW, outH, image, format, width, height);
+                } else if (deliversYuv(frame, requestedFormat, outW, outH)) {
+                    const bool later = yuvRoundTrip && requestedFormat == mlt_image_yuv422;
+                    res = later ? deliverYuv422Later(scope, out, frame, outW, outH, image, format, width, height)
+                                : deliverYuv(scope, out.ptr(), frame, outW, outH, requestedFormat, image, format, width, height);
                     if (res == CUDA_SUCCESS) {
                         runtime.countFrame(true);
-                        logDebug("%s: %dx%d on GPU, %s", effect.service, outW, outH,
-                                 yuvRoundTrip ? "kept on GPU, its conversion to YUV and back to RGBA left to the caller" : "converted to YUV 4:2:2 on GPU");
+                        if (later) {
+                            logDebug("%s: %dx%d on GPU, kept on GPU, its conversion to YUV and back to RGBA left to the caller", effect.service, outW, outH);
+                        } else {
+                            logDebug("%s: %dx%d on GPU, converted to %s on GPU", effect.service, outW, outH, mlt_image_format_name(requestedFormat));
+                        }
                         return 0;
                     }
                 } else {
@@ -660,7 +672,7 @@ int bridgeGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *format, i
     // A cheap effect on its own would spend more time copying the frame to
     // the GPU and back than the CPU needs to process it, unless the GPU also
     // converts the result to the format the caller asked for
-    if (effect.lightweight && !callerWantsDevice && !(lowerOnGpu && *format == mlt_image_rgba) && !deliversYuv422(frame, *format, *width, *height)) {
+    if (effect.lightweight && !callerWantsDevice && !(lowerOnGpu && *format == mlt_image_rgba) && !deliversYuv(frame, *format, *width, *height)) {
         return cpuGetImage(frame, image, format, width, height, writable);
     }
     if (!Runtime::instance().ensureInitialized()) {
@@ -801,7 +813,7 @@ CUresult convertTopBack(mlt_frame bFrame, FetchedImage &top)
     }
     DeviceImage &device = *top.device;
     mlt_properties properties = MLT_FRAME_PROPERTIES(bFrame);
-    if (deliversYuv422(bFrame, mlt_image_yuv422, top.width, top.height) && mlt_properties_get_int(properties, "colorspace") == device.colorspace &&
+    if (deliversYuv(bFrame, mlt_image_yuv422, top.width, top.height) && mlt_properties_get_int(properties, "colorspace") == device.colorspace &&
         !mlt_properties_get_int(properties, "full_range")) {
         DeviceBuffer rgba;
         CUresult res = convertRgbaThroughYuv422(scope, device.buffer.ptr(), top.width, top.height, device.colorspace, device.colorspace, false, rgba);
@@ -983,12 +995,12 @@ int runTransitionOnGpu(mlt_frame aFrame, mlt_get_image cpuGetImage, const Transi
                     logDebug("%s: %dx%d on GPU, kept on GPU", descriptor.service, bottom.width, bottom.height);
                     return 0;
                 }
-            } else if (res == CUDA_SUCCESS && deliversYuv422(aFrame, requestedFormat, bottom.width, bottom.height)) {
-                res = deliverYuv422(scope, out.ptr(), aFrame, bottom.width, bottom.height, image, format, width, height);
+            } else if (res == CUDA_SUCCESS && deliversYuv(aFrame, requestedFormat, bottom.width, bottom.height)) {
+                res = deliverYuv(scope, out.ptr(), aFrame, bottom.width, bottom.height, requestedFormat, image, format, width, height);
                 if (res == CUDA_SUCCESS) {
                     mlt_frame_set_image(bFrame, nullptr, 0, nullptr);
                     runtime.countFrame(true);
-                    logDebug("%s: %dx%d on GPU, converted to YUV 4:2:2 on GPU", descriptor.service, bottom.width, bottom.height);
+                    logDebug("%s: %dx%d on GPU, converted to %s on GPU", descriptor.service, bottom.width, bottom.height, mlt_image_format_name(requestedFormat));
                     return 0;
                 }
             } else if (res == CUDA_SUCCESS) {
@@ -1062,7 +1074,7 @@ int bridgeTransitionGetImage(mlt_frame aFrame, uint8_t **image, mlt_image_format
     ctx.topOnGpu = topSource != nullptr;
     ctx.bottomOnGpu = bottomSource != nullptr;
     ctx.callerOnGpu = callerWantsDevice;
-    ctx.convertsOnGpu = !callerWantsDevice && deliversYuv422(aFrame, *format, *width, *height);
+    ctx.convertsOnGpu = !callerWantsDevice && deliversYuv(aFrame, *format, *width, *height);
     TransitionPlan plan = descriptor.plan(ctx);
     if (plan.decision != Decision::Gpu || !plan.job || !Runtime::instance().ensureInitialized()) {
         if (plan.decision == Decision::Gpu) {

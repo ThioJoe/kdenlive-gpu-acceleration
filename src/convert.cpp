@@ -94,6 +94,53 @@ CUresult convertRgbaToYuv422(GpuScope &scope, CUdeviceptr rgba, int width, int h
     return res;
 }
 
+bool convertsRgbaToYuv420(int width, int height)
+{
+    // libswscale writes past the chroma planes of narrower images
+    sws::ScaleFilter filter;
+    return width >= 8 && height >= 2 && !(width & 1) && !(height & 1) && sws::scaleFilter(sws::ScaleBicubic, true, height, height / 2, filter);
+}
+
+CUresult convertRgbaToYuv420(GpuScope &scope, CUdeviceptr rgba, int width, int height, int colorspace, bool tenBit, uint8_t *yuv, uint8_t *alpha)
+{
+    // The vertical filter of the chroma, which libswscale subsamples with its
+    // scaler
+    sws::ScaleFilter filter;
+    if (width < 8 || height < 2 || (width & 1) || (height & 1) || !sws::scaleFilter(sws::ScaleBicubic, true, height, height / 2, filter)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const size_t pixels = size_t(width) * size_t(height);
+    const size_t yuvBytes = pixels * 3 / 2 * (tenBit ? 2 : 1);
+    const size_t coefficientBytes = filter.coefficients.size() * sizeof(int16_t);
+    const size_t positionsOffset = (coefficientBytes + 255) & ~size_t(255);
+    const size_t yuvOffset = (positionsOffset + filter.positions.size() * sizeof(int32_t) + 255) & ~size_t(255);
+    const size_t alphaOffset = (yuvOffset + yuvBytes + 255) & ~size_t(255);
+    const sws::RgbToYuv k = sws::rgbToYuv(sws::colorspaceTable(colorspace));
+    DeviceBuffer work;
+    CUresult res = work.allocate(alphaOffset + (alpha ? pixels : 0));
+    if (res == CUDA_SUCCESS) {
+        res = scope.upload(work.ptr(), filter.coefficients.data(), coefficientBytes);
+    }
+    if (res == CUDA_SUCCESS) {
+        res = scope.upload(work.ptr() + positionsOffset, filter.positions.data(), filter.positions.size() * sizeof(int32_t));
+    }
+    if (res == CUDA_SUCCESS) {
+        const CUdeviceptr alphaPlane = alpha ? work.ptr() + alphaOffset : 0;
+        res = scope.launch2D(KernelId::gpufx_rgba_to_yuv420, width / 2, height / 2, 32, 8, rgba, work.ptr() + yuvOffset, alphaPlane, width, height,
+                             tenBit ? 1 : 0, work.ptr(), work.ptr() + positionsOffset, filter.size, k.ry, k.gy, k.by, k.ru, k.gu, k.bu, k.rv, k.gv, k.bv);
+    }
+    if (res == CUDA_SUCCESS) {
+        res = scope.download(yuv, work.ptr() + yuvOffset, yuvBytes);
+    }
+    if (res == CUDA_SUCCESS && alpha) {
+        res = scope.download(alpha, work.ptr() + alphaOffset, pixels);
+    }
+    if (res == CUDA_SUCCESS) {
+        res = scope.synchronize();
+    }
+    return res;
+}
+
 CUresult convertRgbaThroughYuv422(GpuScope &scope, CUdeviceptr rgba, int width, int height, int colorspace, int backColorspace, bool backFullRange,
                                   DeviceBuffer &out)
 {
