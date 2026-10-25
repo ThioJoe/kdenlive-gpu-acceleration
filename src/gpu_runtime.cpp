@@ -169,8 +169,9 @@ bool Runtime::initialize()
     m_poolLimit = std::max<size_t>(limit, size_t(64) << 20);
 
     // Page-locked memory holds the frames on their way to and from the GPU,
-    // including downloaded frames that wait in MLT's queues
-    size_t hostLimit = size_t(512) << 20;
+    // including downloaded frames that wait in MLT's queues: a 4K render
+    // with 8 threads uses about 700 MB
+    size_t hostLimit = size_t(1024) << 20;
     if (const char *mb = getenv("GPUFX_PINNED_MB")) {
         hostLimit = size_t(std::max(0, atoi(mb))) << 20;
     }
@@ -310,9 +311,13 @@ void *Runtime::allocateHost(size_t bytes)
                 return const_cast<void *>(block.first);
             }
         }
-        // Make room with the unused blocks of other sizes
+        // Make room with the blocks of other sizes that are no longer used,
+        // e.g. after a change of resolution. Freeing and allocating
+        // page-locked memory takes long and can stall the GPU: when the
+        // blocks are all in use, this copy uses pageable memory instead.
+        const auto now = std::chrono::steady_clock::now();
         for (auto it = m_hostBlocks.begin(); it != m_hostBlocks.end() && m_hostBytes + size > m_hostLimit;) {
-            if (it->second.inUse) {
+            if (it->second.inUse || now - it->second.released < std::chrono::seconds(10)) {
                 ++it;
                 continue;
             }
@@ -338,7 +343,7 @@ void *Runtime::allocateHost(size_t bytes)
         m_hostBytes -= size;
         return nullptr;
     }
-    m_hostBlocks[ptr] = HostBlock{size, true};
+    m_hostBlocks[ptr] = HostBlock{size, true, {}};
     return ptr;
 }
 
@@ -350,6 +355,7 @@ bool Runtime::recycleHost(void *ptr)
         return false;
     }
     it->second.inUse = false;
+    it->second.released = std::chrono::steady_clock::now();
     return true;
 }
 

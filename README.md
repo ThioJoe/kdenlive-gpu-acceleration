@@ -255,7 +255,7 @@ The module also reads these environment variables:
 | `MLT_GPUFX_QTBLEND=force` | Accelerate Transform with MLT versions newer than the module knows |
 | `GPUFX_CUDA_DEVICE=n`     | Use the n-th CUDA device (default 0) |
 | `GPUFX_POOL_MB=n`         | Size of the GPU memory kept for reuse (default: 1/8 of the GPU memory, at most 1 GiB) |
-| `GPUFX_PINNED_MB=n`       | At most this much page-locked memory for frames on their way to and from the GPU, which the GPU copies faster and without the CPU (default 512, `0` uses MLT's memory) |
+| `GPUFX_PINNED_MB=n`       | At most this much page-locked memory for frames on their way to and from the GPU, which the GPU copies faster and without the CPU (default 1024, `0` uses MLT's memory) |
 
 Applications linking MLT can also set the MLT global property
 `gpufx.enabled` to `0` or `1` at any time, which overrides the settings file.

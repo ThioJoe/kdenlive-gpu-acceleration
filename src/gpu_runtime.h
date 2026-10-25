@@ -9,6 +9,7 @@
 #include "cuda_driver.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -121,6 +122,7 @@ private:
     {
         size_t bytes;
         bool inUse;
+        std::chrono::steady_clock::time_point released;
     };
     std::mutex m_hostMutex;
     std::map<const void *, HostBlock> m_hostBlocks;
