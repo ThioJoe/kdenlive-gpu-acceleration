@@ -1,0 +1,356 @@
+# SPDX-FileCopyrightText: 2026 ThioJoe
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Builds the GPU effects module (gpufx, see README.md) and its settings page
+# for Kdenlive's Linux AppImage, tests them inside that AppImage's files, and
+# packages them laid out like the AppImage's content: copying the package's
+# usr folder into the folder of an extracted AppImage adds them.
+#
+# The build runs in an AlmaLinux 9 container with GCC 14 from gcc-toolset,
+# like Kdenlive's AppImage, so that the module needs no newer glibc or
+# libstdc++ than Kdenlive itself. The workflow uses no action but
+# actions/upload-artifact: the source is fetched with git.
+
+name: Linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      kdenlive_version:
+        description: Kdenlive release whose Linux AppImage the module is tested with and laid out for
+        required: true
+        default: '26.08.2'
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  KDENLIVE_VERSION: ${{ inputs.kdenlive_version || '26.08.2' }}
+  # MLT headers to compile with. The module adapts to the version of the MLT
+  # it is loaded into at runtime.
+  MLT_HEADERS: v7.42.0
+  # The system the build runs in: the one Kdenlive's AppImage is built on
+  BUILD_IMAGE: almalinux:9
+
+jobs:
+  linux:
+    name: Build and test with Kdenlive ${{ inputs.kdenlive_version || '26.08.2' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Get the source and MLT's headers
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          git init -q source
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          git -C source -c http.extraheader="$auth" fetch -q --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_SHA"
+          git -C source checkout -q FETCH_HEAD
+          git clone -q --depth 1 --branch "$MLT_HEADERS" https://github.com/mltframework/mlt.git mlt
+
+      # Extracted, as Tools/install-gpufx.sh does: an AppImage cannot be
+      # changed, the module goes into the extracted folder
+      - name: Get Kdenlive's AppImage
+        run: |
+          series=${KDENLIVE_VERSION%.*}
+          name=kdenlive-${KDENLIVE_VERSION}-x86_64.AppImage
+          # Older releases move to the Attic
+          for base in "https://download.kde.org/stable/kdenlive/$series/linux" "https://download.kde.org/Attic/kdenlive/$series/linux"; do
+            echo "Downloading $base/$name"
+            if curl --fail --location --retry 3 --connect-timeout 30 --silent --show-error --output "$name" "$base/$name"; then
+              break
+            fi
+            rm -f "$name"
+          done
+          if [ ! -f "$name" ]; then
+            echo "::error::Cannot download $name from download.kde.org"
+            exit 1
+          fi
+          chmod +x "$name"
+          ./"$name" --appimage-extract > /dev/null
+          rm "$name"
+          mv squashfs-root kdenlive
+          test -f kdenlive/usr/lib/libmlt-7.so.7 || { echo "::error::$name has no usr/lib/libmlt-7.so.7"; exit 1; }
+          echo "KDENLIVE_ROOT=$PWD/kdenlive" >> "$GITHUB_ENV"
+
+      # Qt and KDE Frameworks of AlmaLinux and EPEL for the settings page,
+      # which uses Kdenlive's own at runtime. The folder is mounted at the
+      # same path in the container, where the tests find the libraries they
+      # were linked to.
+      - name: Build
+        run: |
+          cat > build-in-container.sh <<'EOF'
+          dnf install -y -q dnf-plugins-core epel-release
+          dnf config-manager --set-enabled crb
+          if ! dnf install -y -q gcc-toolset-14-gcc-c++ cmake ninja-build file qt6-qtbase-devel kf6-kconfig-devel kf6-kconfigwidgets-devel; then
+            dnf list --available 'kf6-kconfig*' 'qt6-qtbase*' 'gcc-toolset-1*-gcc-c++' || true
+            exit 1
+          fi
+          rpm -q gcc-toolset-14-gcc-c++ qt6-qtbase-devel kf6-kconfig-devel kf6-kconfigwidgets-devel
+          source /opt/rh/gcc-toolset-14/enable
+          # Linked to Kdenlive's own libmlt-7.so, so that a function it does
+          # not have fails the build
+          cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DMLT_INCLUDE_DIR="$PWD/mlt/src" -DMLT_LIBRARY="$KDENLIVE_ROOT/usr/lib/libmlt-7.so.7" -DGPUFX_MLT_MODULE_DIR=lib/mlt-7
+          cmake --build build
+          cmake --install build --prefix "$PWD/dist/usr"
+          chown -R "$HOST_IDS" build dist
+          EOF
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e HOST_IDS="$(id -u):$(id -g)" "$BUILD_IMAGE" bash -eo pipefail build-in-container.sh
+          test -f build/gpufx/gpufx-settings.so || { echo "::error::The settings page was not built"; exit 1; }
+
+      - name: Check the module's dependencies
+        run: |
+          deps=$(readelf -d build/libmltgpufx.so | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+          echo "$deps"
+          for lib in $deps; do
+            case "$lib" in
+              libmlt-7.so.7|libstdc++.so.6|libgcc_s.so.1|libm.so.6|libc.so.6|libdl.so.2|libpthread.so.0|ld-linux-x86-64.so.2) ;;
+              *) echo "::error::libmltgpufx.so needs $lib, which is not part of the system or MLT"; exit 1 ;;
+            esac
+          done
+
+      # Every system that runs Kdenlive's AppImage must be able to load the
+      # module and the page: they may not need newer versions of glibc and
+      # libstdc++ than the AppImage's own files
+      - name: Check the versions of glibc and libstdc++ the files need
+        run: |
+          find "$KDENLIVE_ROOT" -type f -exec file {} + | grep ': *ELF' | cut -d: -f1 > kdenlive-elf.txt
+          status=0
+          for prefix in GLIBC GLIBCXX CXXABI; do
+            theirs=$(xargs -a kdenlive-elf.txt objdump -T 2>/dev/null | grep -oE "\b${prefix}_[0-9.]+" | sort -Vu | tail -n 1)
+            for file in build/libmltgpufx.so build/gpufx/gpufx-settings.so; do
+              ours=$(objdump -T "$file" | grep -oE "\b${prefix}_[0-9.]+" | sort -Vu | tail -n 1)
+              echo "$(basename "$file"): $prefix ${ours:-none}, Kdenlive's files: $theirs"
+              if [ -n "$ours" ] && [ "$(printf '%s\n%s\n' "$ours" "$theirs" | sort -V | tail -n 1)" != "$theirs" ]; then
+                echo "::error::$(basename "$file") needs $ours, newer than what Kdenlive's own files need ($theirs)"
+                status=1
+              fi
+            done
+          done
+          exit $status
+
+      # The libraries of Kdenlive's AppImage whose behaviour the module copies
+      # or whose functions it uses, with their SHA-256, to compare Kdenlive
+      # versions
+      - name: List the libraries the module depends on
+        run: |
+          root=$KDENLIVE_ROOT
+          echo "MLT: $("$root/usr/bin/melt" -version 2>&1 | head -n 1)"
+          {
+            find "$root/usr/lib" -maxdepth 1 -type f -regextype posix-extended -regex '.*/(libmlt(\+\+)?-7|libQt6(Core|Gui|Widgets)|lib(avcodec|avformat|avutil|swscale)|libKF6Config(Core|Widgets))\.so\.[0-9.]+'
+            find "$root/usr/lib/mlt-7" -type f -name '*.so'
+            find "$root/usr/lib/frei0r-1" -type f \( -name squareblur.so -o -name glow.so -o -name softglow.so -o -name sharpness.so \)
+          } | sort | while read -r file; do
+            printf '%-45s %10s %s\n' "${file#"$root"/}" "$(stat -c %s "$file")" "$(sha256sum "$file" | cut -c 1-16)"
+          done
+
+      # The page is built with AlmaLinux's Qt and KDE Frameworks but runs with
+      # Kdenlive's, which can be older: every function it uses from them must
+      # be in Kdenlive's libraries.
+      - name: Check the settings page against Kdenlive's libraries
+        run: |
+          lib="$KDENLIVE_ROOT/usr/lib"
+          echo "Kdenlive's Qt $(ls "$lib"/libQt6Core.so.6.* | sed 's/.*\.so\.//'), KDE Frameworks $(ls "$lib"/libKF6ConfigCore.so.6.* | sed 's/.*\.so\.//')"
+          check_imports() {
+            local file=$1 status=0 libs=()
+            for needed in $(readelf -d "$file" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+              case "$needed" in
+                libstdc++.so.6|libgcc_s.so.1|libm.so.6|libc.so.6|libdl.so.2|libpthread.so.0|ld-linux-x86-64.so.2) continue ;;
+              esac
+              if [ ! -f "$lib/$needed" ]; then
+                echo "::error::$(basename "$file") needs $needed, which is not in Kdenlive's AppImage"
+                status=1
+                continue
+              fi
+              libs+=("$lib/$needed")
+            done
+            # The names it needs, but those of glibc and libstdc++, and the
+            # names Kdenlive's copies of its libraries define
+            nm -D --undefined-only "$file" | awk '$1 == "U" {print $2}' | grep -vE '@(GLIBC|GLIBCXX|CXXABI|GCC)_' | sed 's/@.*//' | sort -u > imports.txt
+            nm -D --defined-only "${libs[@]}" | awk 'NF >= 3 {print $3}' | sed 's/@.*//' | sort -u > exports.txt
+            missing=$(comm -23 imports.txt exports.txt)
+            echo "$(basename "$file"): $(wc -l < imports.txt) functions from ${#libs[@]} libraries"
+            if [ ! -s imports.txt ] || [ ! -s exports.txt ]; then
+              echo "::error::No function found in the imports of $(basename "$file") or the exports of Kdenlive's libraries"
+              status=1
+            fi
+            if [ -n "$missing" ]; then
+              echo "::error::Kdenlive's libraries lack functions that $(basename "$file") uses"
+              echo "$missing" | c++filt
+              status=1
+            fi
+            return $status
+          }
+          check_imports build/gpufx/gpufx-settings.so
+          check_imports build/tests/gpufx_settings_test
+
+      # Libraries that Kdenlive takes from the system, which GitHub's runner
+      # lacks, and a virtual screen for Kdenlive
+      - name: Install what Kdenlive needs from the system
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libopengl0 libegl1 libglx0 libgl1 libgl1-mesa-dri libfontconfig1 libfreetype6 libdbus-1-3 \
+            libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libpulse0 libasound2t64 xvfb xauth dbus-daemon
+          missing=$(find "$KDENLIVE_ROOT/usr/bin" "$KDENLIVE_ROOT/usr/lib/mlt-7" -type f \( -name '*.so' -o -name kdenlive -o -name melt \) -exec env LD_LIBRARY_PATH="$KDENLIVE_ROOT/usr/lib" ldd {} \; 2>/dev/null | grep 'not found' | sort -u)
+          if [ -n "$missing" ]; then
+            echo "Still missing:"
+            echo "$missing"
+          fi
+
+      - name: Test inside Kdenlive's AppImage
+        run: |
+          root=$KDENLIVE_ROOT
+          # Installed as in Kdenlive's folder: MLT loads the module from
+          # usr/lib/mlt-7, the module loads the page from usr/lib/mlt-7/gpufx
+          cp build/libmltgpufx.so "$root/usr/lib/mlt-7/"
+          mkdir -p "$root/usr/lib/mlt-7/gpufx"
+          cp build/gpufx/gpufx-settings.so "$root/usr/lib/mlt-7/gpufx/"
+          # From usr/bin, with the environment Kdenlive's AppRun sets, MLT
+          # finds its modules, data and frei0r plugins as it does for Kdenlive,
+          # and Qt finds Kdenlive's plugins and data. The tests find Kdenlive's
+          # libraries through LD_LIBRARY_PATH.
+          cp build/tests/gpufx_test build/tests/gpufx_settings_test "$root/usr/bin/"
+          this_dir=$root
+          source "$root/apprun-hooks/craft-runenv-hook.sh"
+          export LD_LIBRARY_PATH="$root/usr/lib"
+          export QT_PLUGIN_PATH="$root/usr/plugins"
+          export QT_QPA_PLATFORM=offscreen
+          # The tests' emulated GPU, which runs the kernels on the CPU
+          export GPUFX_CUDA_LIBRARY="$PWD/build/tests/libgpufx_mockcuda.so"
+          "$root/usr/bin/gpufx_test" 2>&1 | tee test.log
+          if grep '^SKIP' test.log; then
+            echo "::error::Kdenlive's MLT lacks services that the tests need"
+            exit 1
+          fi
+          MOCKCUDA_NO_DEVICE=1 "$root/usr/bin/gpufx_test" --no-gpu 2>&1 | tail -n 3
+          "$root/usr/bin/gpufx_test" --settings-off 2>&1 | tail -n 3
+          # The settings page with Kdenlive's Qt and KDE Frameworks
+          mkdir -p screenshot
+          "$root/usr/bin/gpufx_settings_test" "$PWD/screenshot/settings-page.png" 2>&1 | tee settings-test.log
+          rm "$root/usr/bin/gpufx_test" "$root/usr/bin/gpufx_settings_test"
+
+      - name: Package
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cat > dist/README-gpufx.txt <<EOF
+          GPU effects (gpufx) for Kdenlive ${KDENLIVE_VERSION} on Linux, for its AppImage
+
+          Built from ${GITHUB_REPOSITORY} commit ${GITHUB_SHA}
+          by ${RUN_URL}
+
+          An AppImage cannot be changed, so the module goes into an extracted copy:
+            ./kdenlive-${KDENLIVE_VERSION}-x86_64.AppImage --appimage-extract
+          extracts it into a folder named squashfs-root, which can be renamed and
+          moved. Copy the usr folder of this package into that folder. It adds two
+          files:
+          usr/lib/mlt-7/libmltgpufx.so, the GPU effects, which Kdenlive and its
+          renderer load on their own, and
+          usr/lib/mlt-7/gpufx/gpufx-settings.so, which adds a GPU Acceleration page
+          to Kdenlive's settings (Settings > Configure Kdenlive).
+          Then start Kdenlive with the AppRun file of that folder. No root is needed.
+          Tools/install-gpufx.sh in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}
+          does all of this.
+          To uninstall, delete libmltgpufx.so and the gpufx folder.
+
+          It needs an NVIDIA GPU of the Maxwell generation or newer (GeForce GTX 750
+          and later) and NVIDIA's driver, whose libcuda.so.1 the module uses (the
+          nouveau driver has no CUDA). Without them, every effect runs on the CPU
+          as before. GPU processing can be turned off on the settings page, or with
+          the environment variable MLT_GPUFX=0.
+
+          See ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY} for the effects it accelerates.
+          EOF
+          find dist -type f
+
+      # Downloaded as a zip of the dist folder: the README and the usr folder
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpufx-kdenlive-${{ env.KDENLIVE_VERSION }}-linux
+          path: dist/
+          if-no-files-found: error
+
+      # The page in Kdenlive itself, on a virtual screen: a variant of the
+      # page opens Kdenlive's settings dialog once its main window is up,
+      # shows the page, and saves a screenshot and a report (see
+      # GPUFX_SETTINGS_SELFTEST)
+      - name: Open the page in Kdenlive
+        id: kdenlive
+        continue-on-error: true
+        run: |
+          root=$KDENLIVE_ROOT
+          cp build/gpufx/gpufx-settings-selftest.so "$root/usr/lib/mlt-7/gpufx/gpufx-settings.so"
+          export GPUFX_CUDA_LIBRARY="$PWD/build/tests/libgpufx_mockcuda.so"
+          # Runs Kdenlive with the check, which saves its report and
+          # screenshot in screenshot/<name>
+          test_kdenlive() {
+            local name=$1 page=$2 status=0
+            # Settings of a Kdenlive that ran before: no first run wizard and
+            # no welcome screen
+            mkdir -p ~/.config
+            printf '%s\n' "[version]" "version=$KDENLIVE_VERSION" "" "[sdl]" "sdlAudioBackend=sdl2_audio" "" \
+              "[env]" "kdenliverendererpath=$root/usr/bin/kdenlive_render" "" "[startup]" "showWelcome=false" > ~/.config/kdenliverc
+            export GPUFX_SELFTEST_OUTPUT="$PWD/screenshot/$name"
+            export GPUFX_SELFTEST_PAGE=$page
+            mkdir -p "$GPUFX_SELFTEST_OUTPUT"
+            timeout -k 30 240 dbus-run-session -- xvfb-run -a -s '-screen 0 1920x1080x24' "$root/AppRun" > "$GPUFX_SELFTEST_OUTPUT/kdenlive.log" 2>&1 || status=$?
+            echo "=== $name" >&2
+            cat "$GPUFX_SELFTEST_OUTPUT/kdenlive-report.txt" >&2 2>/dev/null || tail -n 40 "$GPUFX_SELFTEST_OUTPUT/kdenlive.log" >&2
+            if [ "$status" = 124 ] || [ "$status" = 137 ]; then
+              echo "did not finish"
+            else
+              echo "exit code $status"
+            fi
+          }
+          # The dialog with the page, then without it, which tells whether a
+          # failure comes from the page or from Kdenlive on the runner
+          with=$(test_kdenlive with-page 1)
+          without=$(test_kdenlive without-page 0)
+          cp build/gpufx/gpufx-settings.so "$root/usr/lib/mlt-7/gpufx/gpufx-settings.so"
+          echo "with the page: $with"
+          echo "without the page: $without"
+          if [ "$with" != "exit code 0" ]; then
+            echo "::error::The check in Kdenlive failed: $with"
+            exit 1
+          fi
+
+      - name: Upload screenshots of the settings page
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: settings-page-screenshots-linux
+          path: screenshot/
+
+      - name: Summary
+        env:
+          KDENLIVE_CHECK: ${{ steps.kdenlive.outcome }}
+        run: |
+          {
+            echo "### GPU effects module for Kdenlive ${KDENLIVE_VERSION} on Linux (AppImage)"
+            echo
+            echo "Download **gpufx-kdenlive-${KDENLIVE_VERSION}-linux** under Artifacts below and unzip it."
+            echo "Extract Kdenlive's AppImage with \`--appimage-extract\` and copy the package's \`usr\` folder into the extracted folder:"
+            echo "it adds \`usr/lib/mlt-7/libmltgpufx.so\` and \`usr/lib/mlt-7/gpufx/gpufx-settings.so\`. \`Tools/install-gpufx.sh\` does this without root."
+            echo
+            echo "Tests run inside Kdenlive ${KDENLIVE_VERSION}'s own AppImage files, with an emulated GPU:"
+            echo
+            echo '```'
+            tail -n 1 test.log
+            tail -n 1 settings-test.log
+            echo '```'
+            echo
+            if [ "$KDENLIVE_CHECK" = success ]; then
+              echo "The settings page also opened in Kdenlive's own settings dialog on the runner."
+            else
+              echo "The check that opens the settings page in Kdenlive's own settings dialog failed: see the log of its step."
+            fi
+            echo "**settings-page-screenshots-linux** shows the page in a test dialog and in Kdenlive's settings dialog."
+          } >> "$GITHUB_STEP_SUMMARY"

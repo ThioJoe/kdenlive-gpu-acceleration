@@ -14,7 +14,9 @@
 #
 #   -DMLT_INCLUDE_DIR=<MLT source>/src -DMLT_LIBRARY=<Kdenlive>/bin/libmlt-7.dll
 #
-# MinGW links DLLs directly, no import library is needed.
+# MinGW links DLLs directly, no import library is needed. For Kdenlive's
+# Linux AppImage, extracted with --appimage-extract, the library is
+# <extracted AppImage>/usr/lib/libmlt-7.so.7.
 #
 # Building it needs no CUDA toolkit: the kernels are compiled into PTX that is
 # shipped in kernels/gpufx_kernels.ptx, and the NVIDIA driver is loaded at
@@ -152,9 +154,16 @@ if(NOT MSVC)
     # The kernels' emulation and Qt compatibility rely on exact float math
     target_compile_options(mltgpufx PRIVATE -ffp-contract=off)
 endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # A function missing from the libraries it is linked to fails the build
+    # instead of the loading, as on Windows
+    target_link_options(mltgpufx PRIVATE -Wl,--no-undefined)
+endif()
 
 # MLT only loads modules from its own module directory: lib/mlt in Kdenlive's
-# Windows builds, the moduledir of MLT's pkg-config file elsewhere.
+# Windows builds, usr/lib/mlt-7 in its AppImage (-DGPUFX_MLT_MODULE_DIR=lib/mlt-7
+# with the prefix <extracted AppImage>/usr), the moduledir of MLT's pkg-config
+# file elsewhere.
 set(GPUFX_MLT_MODULE_DIR "" CACHE PATH "Where to install the gpufx MLT module (defaults to MLT's module directory)")
 set(gpufx_install_dir "${GPUFX_MLT_MODULE_DIR}")
 if(NOT gpufx_install_dir)

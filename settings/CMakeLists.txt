@@ -9,7 +9,7 @@
 set(targets gpufx-settings)
 if(BUILD_TESTING)
     # A variant that opens the page in Kdenlive and takes a screenshot, for
-    # the Windows workflow (see selftest.cpp). Not installed.
+    # the workflows (see selftest.cpp). Not installed.
     list(APPEND targets gpufx-settings-selftest)
 endif()
 foreach(target ${targets})
@@ -20,6 +20,9 @@ foreach(target ${targets})
     # fine as long as it has every function the page uses. The tests check that
     # by loading the page with Kdenlive's own libraries.
     target_compile_definitions(${target} PRIVATE QT_NO_VERSION_TAGGING)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(${target} PRIVATE -Wl,--no-undefined)
+    endif()
     set_target_properties(${target} PROPERTIES
         PREFIX ""
         CXX_STANDARD 17
