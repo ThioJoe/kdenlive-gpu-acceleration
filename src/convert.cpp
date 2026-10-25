@@ -89,4 +89,39 @@ CUresult convertRgbaToYuv422(GpuScope &scope, CUdeviceptr rgba, int width, int h
     return res;
 }
 
+CUresult convertRgbaThroughYuv422(GpuScope &scope, CUdeviceptr rgba, int width, int height, int colorspace, int backColorspace, bool backFullRange,
+                                  DeviceBuffer &out)
+{
+    if (width <= 0 || height <= 0 || (width & 1)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const size_t pixels = size_t(width) * size_t(height);
+    std::vector<int> columns;
+    sws::chroma422Columns(width, columns);
+    const size_t tableBytes = columns.size() * sizeof(int);
+    const sws::RgbToYuv to = sws::rgbToYuv(sws::colorspaceTable(colorspace));
+    const sws::YuvToRgb back = sws::yuvToRgb(sws::colorspaceTable(backColorspace), backFullRange);
+
+    // One buffer: the column table and the YUYV image
+    DeviceBuffer work;
+    const size_t yuvOffset = (tableBytes + 255) & ~size_t(255);
+    CUresult res = work.allocate(yuvOffset + pixels * 2);
+    if (res == CUDA_SUCCESS) {
+        res = scope.upload(work.ptr(), columns.data(), tableBytes);
+    }
+    if (res == CUDA_SUCCESS) {
+        const CUdeviceptr noAlpha = 0;
+        res = scope.launch2D(KernelId::gpufx_rgba_to_yuyv422, width / 2, height, 32, 8, rgba, work.ptr() + yuvOffset, noAlpha, width, height, to.ry, to.gy,
+                             to.by, to.ru, to.gu, to.bu, to.rv, to.gv, to.bv, 0);
+    }
+    if (res == CUDA_SUCCESS) {
+        res = out.allocate(pixels * 4);
+    }
+    if (res == CUDA_SUCCESS) {
+        res = scope.launch2D(KernelId::gpufx_yuyv422_to_rgba, width, height, 32, 8, work.ptr() + yuvOffset, work.ptr(), rgba, out.ptr(), width, height,
+                             back.yOffset, back.yCoeff, back.v2r, back.v2g, back.u2g, back.u2b);
+    }
+    return res;
+}
+
 } // namespace gpufx

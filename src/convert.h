@@ -47,4 +47,14 @@ CUresult convertYuv420ToRgba(GpuScope &scope, const Yuv420Image &image, DeviceBu
  *  be even. Synchronizes the stream. */
 CUresult convertRgbaToYuv422(GpuScope &scope, CUdeviceptr rgba, int width, int height, int colorspace, bool fullRange, uint8_t *yuv422, uint8_t *alpha);
 
+/** Converts an RGBA image on the GPU to packed 4:2:2 YUV and back to RGBA, as
+ *  MLT's avcolour_space does when an RGBA image is asked for in YUV 4:2:2 and
+ *  then converted back: to limited range YUV in colorspace as
+ *  convertRgbaToYuv422() does, back from backColorspace and backFullRange
+ *  (sws_scale() with SWS_POINT | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT). The
+ *  alpha channel is kept. out receives width x height RGBA pixels. The width
+ *  must be even. Does not synchronize the stream. */
+CUresult convertRgbaThroughYuv422(GpuScope &scope, CUdeviceptr rgba, int width, int height, int colorspace, int backColorspace, bool backFullRange,
+                                  DeviceBuffer &out);
+
 } // namespace gpufx

@@ -1101,3 +1101,41 @@ GPUFX_KERNEL void gpufx_rgba_to_yuyv422(const gpufx_u32 *__restrict__ src, gpufx
         alpha[index + 1] = gpufx_u8(p1 >> 24);
     }
 }
+
+/* Packed 4:2:2 YUV (YUYV) to RGBA, as MLT's avcolour_space converts it with
+ * the flags of gpufx_yuv420_to_rgba(): the same arithmetic, with the chroma of
+ * the pixel's own row. columns gives the chroma sample of every pixel column.
+ * The alpha channel comes from alphaSrc, an RGBA image of the same size, as
+ * avcolour_space merges back the alpha plane it took out of the RGBA image. */
+GPUFX_KERNEL void gpufx_yuyv422_to_rgba(const gpufx_u8 *__restrict__ src, const int *__restrict__ columns, const gpufx_u32 *__restrict__ alphaSrc,
+                                        gpufx_u32 *__restrict__ dst, int w, int h, int yOffset, int yCoeff, int v2r, int v2g, int u2g, int u2b)
+{
+    const int x = GPUFX_GLOBAL_X;
+    const int y = GPUFX_GLOBAL_Y;
+    if (x >= w || y >= h) {
+        return;
+    }
+    const size_t pixel = size_t(y) * size_t(w) + size_t(x);
+    const size_t chroma = (size_t(y) * size_t(w) + 2 * size_t(columns[x])) * 2;
+    int Y = int(src[pixel * 2]) << 7;
+    int U = int(src[chroma + 1]) << 7;
+    int V = int(src[chroma + 3]) << 7;
+
+    // yuv2rgb_full_1_c_template() without vertical chroma interpolation
+    Y *= 4;
+    U = (U - (128 << 7)) * 4;
+    V = (V - (128 << 7)) * 4;
+    // yuv2rgb_write_full()
+    Y -= yOffset;
+    Y *= yCoeff;
+    Y += 1 << 21;
+    int R = int(gpufx_u32(Y) + gpufx_u32(V) * gpufx_u32(v2r));
+    int G = int(gpufx_u32(Y) + gpufx_u32(V) * gpufx_u32(v2g) + gpufx_u32(U) * gpufx_u32(u2g));
+    int B = int(gpufx_u32(Y) + gpufx_u32(U) * gpufx_u32(u2b));
+    if ((R | G | B) & 0xC0000000) {
+        R = gpufx_clip_uintp2_30(R);
+        G = gpufx_clip_uintp2_30(G);
+        B = gpufx_clip_uintp2_30(B);
+    }
+    dst[pixel] = gpufx_pack(gpufx_u32(R >> 22), gpufx_u32(G >> 22), gpufx_u32(B >> 22), alphaSrc[pixel] >> 24);
+}

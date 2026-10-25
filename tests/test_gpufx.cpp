@@ -1294,9 +1294,13 @@ void testYuvOutput(mlt_profile profile)
             g_mock.reset();
             const Output gpuTop = renderYuv(false, c.filters, nullptr, mlt_image_yuv420p);
             const uint64_t launches = g_mock.stats().launches;
+            const uint64_t downloaded = g_mock.stats().downloadedBytes;
             expectSameOutput(renderYuv(true, c.filters, nullptr, mlt_image_yuv420p), gpuTop, what, 1);
             if (g_mock.active()) {
                 check(launches > 0, "%s: nothing ran on the GPU", what.c_str());
+                // The top image goes to YUV and back to RGBA on the GPU
+                const uint64_t pixels = uint64_t(profile->width) * uint64_t(profile->height);
+                check(downloaded == pixels * 3, "%s: %llu bytes downloaded, expected only the YUV output", what.c_str(), (unsigned long long)downloaded);
             }
         }
     }

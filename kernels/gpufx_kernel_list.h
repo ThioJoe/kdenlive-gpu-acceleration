@@ -30,4 +30,5 @@
     X(gpufx_qt_draw_image)                                                                                                                                     \
     X(gpufx_alpha_check)                                                                                                                                       \
     X(gpufx_yuv420_to_rgba)                                                                                                                                    \
-    X(gpufx_rgba_to_yuyv422)
+    X(gpufx_rgba_to_yuyv422)                                                                                                                                   \
+    X(gpufx_yuyv422_to_rgba)

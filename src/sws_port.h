@@ -65,5 +65,10 @@ void pointSamples(int srcSize, int dstSize, int srcPos, int dstPos, std::vector<
  *  frames, the height must be a multiple of 4). */
 void chroma420Samples(int width, int height, bool fields, std::vector<int> &columns, std::vector<int> &rows);
 
+/** The chroma column used for every pixel column by libswscale to convert
+ *  packed 4:2:2 YUV of the given width to RGB with SWS_POINT and full chroma
+ *  interpolation, as MLT's avcolour_space does. */
+void chroma422Columns(int width, std::vector<int> &columns);
+
 } // namespace sws
 } // namespace gpufx

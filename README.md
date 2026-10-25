@@ -178,6 +178,12 @@ back to YUV.
   `avcolor_space` filter, the GPU converts the result and only the YUV image
   (and its alpha channel) is downloaded. This also lets compositing and
   lightweight effects run on the GPU when nothing else of the frame is there.
+* **Round trip through YUV**: compositing without a rectangle (Kdenlive's
+  track compositing) first asks for the top track's image in the output
+  format, and converts a YUV image with an alpha channel straight back to
+  RGBA. An image converted from RGBA always has one. When the top track's
+  last effect ran on the GPU, the image is converted to YUV and back there,
+  with the same arithmetic, and stays on the GPU.
 
 Both conversions reproduce libswscale with the flags MLT uses: the
 coefficients, chroma sampling positions and rounding are ported in

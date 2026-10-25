@@ -218,5 +218,11 @@ void chroma420Samples(int width, int height, bool fields, std::vector<int> &colu
     }
 }
 
+void chroma422Columns(int width, std::vector<int> &columns)
+{
+    // Horizontally the chroma of 4:2:2 is subsampled as that of 4:2:0
+    pointSamples((width + 1) >> 1, width, localPosition(1, -513), localPosition(0, -513), columns);
+}
+
 } // namespace sws
 } // namespace gpufx
