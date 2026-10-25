@@ -8,7 +8,8 @@
 #
 # The module is built in an AlmaLinux 9 container with GCC 14 from
 # gcc-toolset, like Kdenlive's AppImage, so that it needs no newer glibc or
-# libstdc++ than Kdenlive itself. The workflow uses no action but
+# libstdc++ than Kdenlive itself: PyPA's manylinux_2_34 image, which has that
+# toolchain and CMake installed. The workflow uses no action but
 # actions/upload-artifact: the source is fetched with git.
 
 name: Linux
@@ -31,8 +32,9 @@ env:
   # MLT headers to compile with. The module adapts to the version of the MLT
   # it is loaded into at runtime.
   MLT_HEADERS: v7.42.0
-  # The system the module is built in: the one Kdenlive's AppImage is built on
-  MODULE_IMAGE: almalinux:9
+  # The system the module is built in: the one Kdenlive's AppImage is built on,
+  # AlmaLinux 9 with GCC 14 from gcc-toolset
+  MODULE_IMAGE: quay.io/pypa/manylinux_2_34_x86_64
   # The system the settings page is built in, which has Qt and KDE Frameworks
   # 6 no newer than Kdenlive's (AlmaLinux 9 has no KDE Frameworks 6)
   PAGE_IMAGE: debian:trixie
@@ -90,15 +92,15 @@ jobs:
       - name: Build
         run: |
           cat > build-module.sh <<'EOF'
-          # Ninja is in AlmaLinux's CRB repository
-          dnf install -y -q dnf-plugins-core
-          dnf config-manager --set-enabled crb
-          dnf install -y -q gcc-toolset-14-gcc-c++ cmake ninja-build
-          source /opt/rh/gcc-toolset-14/enable
           g++ --version | head -n 1
-          cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGPUFX_SETTINGS_PAGE=OFF \
+          cmake --version | head -n 1
+          generator="Unix Makefiles"
+          if command -v ninja > /dev/null; then
+            generator=Ninja
+          fi
+          cmake -S source -B build -G "$generator" -DCMAKE_BUILD_TYPE=Release -DGPUFX_SETTINGS_PAGE=OFF \
             -DMLT_INCLUDE_DIR="$PWD/mlt/src" -DMLT_LIBRARY="$KDENLIVE_ROOT/usr/lib/libmlt-7.so.7" -DGPUFX_MLT_MODULE_DIR=lib/mlt-7
-          cmake --build build
+          cmake --build build --parallel
           cmake --install build --prefix "$PWD/dist/usr"
           chown -R "$HOST_IDS" build dist
           EOF
@@ -117,8 +119,9 @@ jobs:
           install -D -m 755 build-page/gpufx/gpufx-settings.so dist/usr/lib/mlt-7/gpufx/gpufx-settings.so
           chown -R "$HOST_IDS" build-page build-page-mlt dist
           EOF
-          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e HOST_IDS="$(id -u):$(id -g)" "$MODULE_IMAGE" bash -eo pipefail build-module.sh
-          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e HOST_IDS="$(id -u):$(id -g)" -e DEBIAN_FRONTEND=noninteractive "$PAGE_IMAGE" bash -eo pipefail build-page.sh
+          # Each one fails after 20 minutes rather than hang until the job's limit
+          timeout 20m docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e HOST_IDS="$(id -u):$(id -g)" "$MODULE_IMAGE" bash -eo pipefail build-module.sh
+          timeout 20m docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e HOST_IDS="$(id -u):$(id -g)" -e DEBIAN_FRONTEND=noninteractive "$PAGE_IMAGE" bash -eo pipefail build-page.sh
           test -f build-page/gpufx/gpufx-settings.so || { echo "::error::The settings page was not built"; exit 1; }
 
       - name: Check the module's dependencies

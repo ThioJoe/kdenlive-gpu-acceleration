@@ -286,8 +286,8 @@ the screenshots of the settings page. Run it by hand (*Actions > Run
 workflow*) to build for another Kdenlive version.
 
 The Linux workflow does the same for Kdenlive's AppImage. It builds the
-module in AlmaLinux 9 with GCC 14 from gcc-toolset, as Kdenlive's AppImage is
-built, against the AppImage's `libmlt-7.so`, and checks that it needs no newer
+module in AlmaLinux 9 with GCC 14 from gcc-toolset (PyPA's `manylinux_2_34`
+image), as Kdenlive's AppImage is built, against the AppImage's `libmlt-7.so`, and checks that it needs no newer
 glibc or libstdc++ than the AppImage's own files, so that it runs wherever the
 AppImage does. The settings page needs KDE Frameworks, which AlmaLinux 9 lacks:
 it is built in Debian 13, whose Qt and KDE Frameworks are older than the
