@@ -72,6 +72,12 @@ if(MINGW)
     option(GPUFX_STATIC_RUNTIME "Link the GCC runtime libraries statically" ON)
     if(GPUFX_STATIC_RUNTIME)
         add_link_options(-static)
+        # mingw-w64 from 4b51967 to 5b128fc (MSYS2's October 2026 builds)
+        # defines __mingw_fe_dfl_env in libmingw32.a, which GCC passes before
+        # libmingwex.a: a DLL that gets fesetenv only from the static
+        # winpthreads cannot find it. Asking for it up front pulls it from
+        # libmingw32.a; with other versions it is found as before.
+        add_link_options(-Wl,--undefined=__mingw_fe_dfl_env)
     endif()
 endif()
 
