@@ -180,7 +180,14 @@ int main(int argc, char **argv)
     QPushButton *apply = buttons ? buttons->button(QDialogButtonBox::Apply) : nullptr;
     QPushButton *defaults = buttons ? buttons->button(QDialogButtonBox::RestoreDefaults) : nullptr;
     if (!item || !enabled || !dropShadow || !compositing || !status || !apply || !defaults) {
-        check(false, "widgets of the page or the dialog are missing");
+        check(false, "widgets of the page or the dialog are missing:%s%s%s%s%s%s%s", item ? "" : " page item", enabled ? "" : " kcfg_enabled",
+              dropShadow ? "" : " kcfg_effect:dropshadow", compositing ? "" : " kcfg_transition:qtblend", status ? "" : " gpufx_status",
+              apply ? "" : " Apply", defaults ? "" : " Defaults");
+        for (QObject *child : dialog->findChildren<QObject *>()) {
+            if (!child->objectName().isEmpty()) {
+                printf("  %s %s\n", child->metaObject()->className(), qPrintable(child->objectName()));
+            }
+        }
         printf("%d checks, %d failures\n", g_checks, g_failures);
         return 1;
     }
