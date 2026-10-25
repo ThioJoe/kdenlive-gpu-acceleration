@@ -147,6 +147,7 @@ add_library(mltgpufx MODULE
     src/qt_draw.cpp
     src/qt_raster.cpp
     src/settings_file.cpp
+    src/stills.cpp
     src/sws_port.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/gpufx_ptx.cpp"
 )

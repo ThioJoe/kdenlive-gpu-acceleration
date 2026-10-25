@@ -97,6 +97,7 @@ MLT's module folder needs root.
 | Video decoding to RGBA              | `avformat` producer  | Identical output, 8-bit 4:2:0 video, see below |
 | Output conversion to YUV            | `avcolor_space`      | Identical output, see below |
 | Clip size and field order           | MLT's normalizing filters | Identical output, see below |
+| Still images, titles, color clips   | `qimage`, `kdenlivetitle`, `color` producers | Identical output, see below |
 
 Any mix of accelerated and CPU-only effects works: each accelerated effect is
 moved to the GPU for its own processing, and the others stay on the CPU.
@@ -200,6 +201,17 @@ back to YUV.
   and padding to the profile's aspect ratio (`resize`) run on the GPU.
   Changing the field order, cropping and the other scaling methods stay on
   the CPU.
+* **Still images, titles and color clips**: these producers make the same
+  picture for every frame, but copy it into a new image each time, which the
+  GPU then uploads. When the next stage is on the GPU, gpufx keeps the
+  picture there: once two frames asking for the same thing (the same size,
+  frame and producer properties apart from the position) got the same
+  picture with the same changes to the frame, the next ones get a copy of it
+  on the GPU and the same frame changes, without the producer. An image
+  sequence changes picture every `ttl` frames, so each picture is kept
+  separately. Animated titles (typewriter, moving view) are left alone. The
+  pictures take at most 1/8 of the GPU memory (1 GiB at most), the least
+  recently used going first.
 
 The conversions and the scaling reproduce libswscale with the flags MLT uses: the
 coefficients, chroma sampling positions and rounding are ported in
@@ -249,7 +261,7 @@ names it `kdenlive-appimagerc`), in a `[gpufx]` group:
 | `enabled=false`             | GPU processing off |
 | `effect:<service>=false`    | Keep the effect with this MLT service on the CPU, e.g. `effect:dropshadow` |
 | `transition:qtblend=false`  | Keep track compositing on the CPU |
-| `conversion:avformat=false` | Keep the decoding of video to RGBA on the CPU (`conversion:avcolor_space` for the output conversion to YUV, `conversion:normalize` for MLT's normalizing filters) |
+| `conversion:avformat=false` | Keep the decoding of video to RGBA on the CPU (`conversion:avcolor_space` for the output conversion to YUV, `conversion:normalize` for MLT's normalizing filters, `conversion:stills` for the pictures of still images, titles and color clips) |
 
 Every process using the module reads them when it starts, and Kdenlive again
 when the settings are applied. With GPU processing off, render processes
@@ -262,11 +274,12 @@ The module also reads these environment variables:
 | `MLT_GPUFX=0`             | Do not touch any filter, and no settings page |
 | `GPUFX_CONFIG_FILE`       | The settings file to read instead of Kdenlive's. The settings page sets it to Kdenlive's actual settings file, and the processes Kdenlive starts inherit it. Without it, the module looks for `kdenliverc`, or on Linux for the name Kdenlive's packages use (`kdenlive-appimagerc` with `PACKAGE_TYPE=appimage`, or when the module is in an extracted AppImage) |
 | `GPUFX_SETTINGS_PAGE=0`   | Do not load the settings page (`1` loads it in any program, for tests) |
-| `MLT_GPUFX_DISABLE`       | Comma separated MLT services to keep on the CPU, e.g. `dropshadow,box_blur`. `avformat` and `avcolor_space` stand for the two image conversions, `normalize` for MLT's normalizing filters |
+| `MLT_GPUFX_DISABLE`       | Comma separated MLT services to keep on the CPU, e.g. `dropshadow,box_blur`. `avformat` and `avcolor_space` stand for the two image conversions, `normalize` for MLT's normalizing filters, `stills` for still images, titles and color clips |
 | `MLT_GPUFX_DEBUG=1`       | Log every frame processed on the GPU (MLT info log level) |
 | `MLT_GPUFX_QTBLEND=force` | Accelerate Transform with MLT versions newer than the module knows |
 | `GPUFX_CUDA_DEVICE=n`     | Use the n-th CUDA device (default 0) |
 | `GPUFX_POOL_MB=n`         | Size of the GPU memory kept for reuse (default: 1/8 of the GPU memory, at most 1 GiB) |
+| `GPUFX_STILLS_MB=n`       | GPU memory for the pictures of still images, titles and color clips (default: 1/8 of the GPU memory, at most 1 GiB) |
 | `GPUFX_PINNED_MB=n`       | At most this much page-locked memory for frames on their way to and from the GPU, which the GPU copies faster and without the CPU (default 1024, `0` uses MLT's memory) |
 
 Applications linking MLT can also set the MLT global property
@@ -395,7 +408,8 @@ of the time there). Every frame was identical to the CPU render.
   Qt's paint engine needed to draw like QPainter.
 * `src/convert.cpp` runs the image conversions and the scaling, with the
   libswscale setup ported in `src/sws_port.cpp`. `src/normalizers.cpp` holds
-  what MLT's normalizing filters do to a frame.
+  what MLT's normalizing filters do to a frame, `src/stills.cpp` the pictures
+  of still producers kept on the GPU.
 * `kernels/gpufx_kernels.cu` contains the kernels. They reproduce the integer
   arithmetic of the CPU code (for the drop shadow, Qt's blur, scaling and
   compositing), which is why the output matches.

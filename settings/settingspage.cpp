@@ -157,6 +157,8 @@ const std::vector<Service> &services()
                     service.label = QStringLiteral("Output conversion to YUV");
                 } else if (service.service == QLatin1String("normalize")) {
                     service.label = QStringLiteral("Clip size and field order (MLT's normalizing filters)");
+                } else if (service.service == QLatin1String("stills")) {
+                    service.label = QStringLiteral("Still images, titles and color clips kept on the GPU");
                 }
             } else {
                 const QStringList names = (service.kind == QLatin1String("transition") ? transitions : effects).value(service.service);

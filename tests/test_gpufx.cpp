@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1268,6 +1269,166 @@ void testNormalizers(mlt_profile profile)
     profile->height = profileHeight;
 }
 
+/** The properties of a frame, apart from data and the module's own */
+std::map<std::string, std::string> frameValues(mlt_frame frame)
+{
+    std::map<std::string, std::string> values;
+    mlt_properties properties = MLT_FRAME_PROPERTIES(frame);
+    for (int i = 0; i < mlt_properties_count(properties); ++i) {
+        const char *name = mlt_properties_get_name(properties, i);
+        // pos.<id> carries the unique id of a filter
+        if (name && strncmp(name, "_gpufx", 6) && strncmp(name, "pos.", 4) && !mlt_properties_get_data_at(properties, i, nullptr)) {
+            const char *value = mlt_properties_get_value(properties, i);
+            values[name] = value ? value : "(null)";
+        }
+    }
+    return values;
+}
+
+/** Frames of a still producer at positions, through filters */
+struct StillRun
+{
+    std::vector<Output> outputs;
+    std::vector<std::map<std::string, std::string>> values;
+    std::vector<std::vector<uint8_t>> alphas;
+    std::vector<uint64_t> uploads;
+};
+
+StillRun renderStill(mlt_profile profile, const char *service, const char *resource, const Properties &producerProperties,
+                     const std::vector<FilterSpec> &specs, bool cpu, const std::vector<int> &positions)
+{
+    StillRun run;
+    mlt_producer producer = mlt_factory_producer(profile, service, resource);
+    if (!producer) {
+        return run;
+    }
+    for (const auto &property : producerProperties) {
+        mlt_properties_set(MLT_PRODUCER_PROPERTIES(producer), property.first, property.second.c_str());
+    }
+    mlt_properties_set_int(MLT_PRODUCER_PROPERTIES(producer), "_gpufx.disable", cpu ? 1 : 0);
+    // The image conversions of a Kdenlive clip
+    mlt_filter converter = mlt_factory_filter(profile, "avcolor_space", nullptr);
+    if (converter) {
+        mlt_producer_attach(producer, converter);
+    }
+    std::vector<mlt_filter> filters = createFilters(profile, specs, cpu);
+    for (mlt_filter filter : filters) {
+        mlt_producer_attach(producer, filter);
+    }
+    for (int position : positions) {
+        mlt_producer_seek(producer, position);
+        mlt_frame frame = nullptr;
+        g_mock.reset();
+        if (mlt_service_get_frame(MLT_PRODUCER_SERVICE(producer), &frame, 0) || !frame) {
+            break;
+        }
+        run.outputs.push_back(fetchOutput(frame, mlt_image_rgba, profile->width, profile->height));
+        run.values.push_back(frameValues(frame));
+        // The alpha plane a producer sets beside an RGBA image, which
+        // mlt_frame_get_alpha_size() does not return
+        int alphaSize = 0;
+        auto *alpha = static_cast<uint8_t *>(mlt_properties_get_data(MLT_FRAME_PROPERTIES(frame), "alpha", &alphaSize));
+        run.alphas.emplace_back(alpha, alpha ? alpha + std::max(alphaSize, 0) : alpha);
+        run.uploads.push_back(g_mock.stats().uploads);
+        mlt_frame_close(frame);
+    }
+    for (mlt_filter filter : filters) {
+        mlt_filter_close(filter);
+    }
+    mlt_filter_close(converter);
+    mlt_producer_close(producer);
+    return run;
+}
+
+/** Still images, titles and color clips: kept on the GPU once two frames
+ *  gave the same picture, with the same output and frame properties */
+void testStills(mlt_profile profile)
+{
+    const std::vector<FilterSpec> blur = {{"box_blur", {{"hradius", "20"}, {"vradius", "15"}}}};
+    if (!hasFilters(blur)) {
+        return;
+    }
+    // A picture for qimage, in a format Qt always reads
+    const std::string ppm = tempPath("gpufx_still.ppm");
+    if (FILE *file = fopen(ppm.c_str(), "wb")) {
+        fprintf(file, "P6\n%d %d\n255\n", 120, 80);
+        for (int y = 0; y < 80; ++y) {
+            for (int x = 0; x < 120; ++x) {
+                const unsigned char pixel[3] = {uint8_t(x * 2), uint8_t(y * 3), uint8_t((x * y) & 255)};
+                fwrite(pixel, 1, 3, file);
+            }
+        }
+        fclose(file);
+    }
+    const std::string title = "<kdenlivetitle width=\"160\" height=\"90\" out=\"100\"><item type=\"QGraphicsRectItem\" z-index=\"0\">"
+                              "<position x=\"20\" y=\"10\"><transform>1,0,0,0,1,0,0,0,1</transform></position>"
+                              "<content brushcolor=\"200,40,40,255\" pencolor=\"0,0,0,255\" penwidth=\"0\" rect=\"0,0,60,30\"/></item>"
+                              "<startviewport rect=\"0,0,160,90\"/><endviewport rect=\"%1\"/><background color=\"0,0,0,0\"/></kdenlivetitle>";
+    auto titleXml = [&title](const char *end) {
+        std::string xml = title;
+        xml.replace(xml.find("%1"), 2, end);
+        return xml;
+    };
+    struct Case
+    {
+        const char *name;
+        const char *service;
+        std::string resource;
+        Properties properties;
+        // Whether the picture is kept on the GPU
+        bool kept;
+    };
+    const Case cases[] = {
+        {"color", "color", "0x3366cc80", {}, true},
+        // The first frames of each period of 3 frames come from the producer
+        {"qimage", "qimage", ppm, {{"ttl", "3"}}, true},
+        {"title", "kdenlivetitle", "", {{"xmldata", titleXml("0,0,160,90")}}, true},
+        {"animated title", "kdenlivetitle", "", {{"xmldata", titleXml("40,20,80,45")}}, false},
+    };
+    const std::vector<int> positions = {0, 1, 2, 3, 4, 5, 6, 1, 2, 7};
+    for (const Case &c : cases) {
+        const std::string what = std::string("stills, ") + c.name;
+        if (!mlt_properties_get_data(mlt_repository_producers(mlt_factory_repository()), c.service, nullptr)) {
+            printf("SKIP: %s: no %s producer\n", what.c_str(), c.service);
+            continue;
+        }
+        const char *resource = c.resource.empty() ? nullptr : c.resource.c_str();
+        const StillRun cpu = renderStill(profile, c.service, resource, c.properties, blur, true, positions);
+        const StillRun gpu = renderStill(profile, c.service, resource, c.properties, blur, false, positions);
+        check(cpu.outputs.size() == positions.size() && gpu.outputs.size() == positions.size(), "%s: %zu and %zu frames", what.c_str(),
+              cpu.outputs.size(), gpu.outputs.size());
+        if (cpu.outputs.size() != positions.size() || gpu.outputs.size() != positions.size()) {
+            continue;
+        }
+        int kept = 0;
+        for (size_t i = 0; i < positions.size(); ++i) {
+            const std::string frame = what + ", frame " + std::to_string(positions[i]);
+            expectSameOutput(cpu.outputs[i], gpu.outputs[i], frame);
+            for (const auto &value : cpu.values[i]) {
+                auto it = gpu.values[i].find(value.first);
+                check(it != gpu.values[i].end() && it->second == value.second, "%s: property %s is %s on the CPU, %s on the GPU", frame.c_str(),
+                      value.first.c_str(), value.second.c_str(), it == gpu.values[i].end() ? "not set" : it->second.c_str());
+            }
+            for (const auto &value : gpu.values[i]) {
+                check(cpu.values[i].count(value.first), "%s: property %s set on the GPU only (%s)", frame.c_str(), value.first.c_str(), value.second.c_str());
+            }
+            check(cpu.alphas[i] == gpu.alphas[i], "%s: the alpha planes differ (%zu and %zu bytes)", frame.c_str(), cpu.alphas[i].size(),
+                  gpu.alphas[i].size());
+            kept += gpu.uploads[i] == 0;
+        }
+        if (g_mock.active()) {
+            // The first call to the producer also sets properties of the
+            // producer (color, title) or of the next frames (qimage), so its
+            // picture is kept from the third frame on. qimage shows a new
+            // picture every 3 frames (ttl): the last frame of the second
+            // period and the second visits of the first come from the GPU.
+            const int expected = !c.kept ? 0 : !strcmp(c.service, "qimage") ? 3 : int(positions.size()) - 3;
+            check(kept == expected, "%s: %d frames without upload, expected %d", what.c_str(), kept, expected);
+        }
+    }
+    remove(ppm.c_str());
+}
+
 /** Filters on a producer, whose image is requested in format. MLT's
  *  avcolour_space converts it, as when the loader normalizes a producer. */
 Output renderFormat(mlt_profile profile, const std::vector<FilterSpec> &specs, const Image &input, bool cpu, mlt_image_format format,
@@ -1491,7 +1652,8 @@ void testSettingsFile(mlt_profile profile, bool expectGpu)
     }
     check(host->version == GPUFX_SETTINGS_API_VERSION && !strcmp(host->group, "gpufx"), "settings host: version %d, group %s", host->version, host->group);
     const std::string services = std::string(",") + host->services + ",";
-    for (const char *service : {",effect:dropshadow,", ",effect:qtblend,", ",transition:qtblend,", ",conversion:avformat,", ",conversion:avcolor_space,", ",conversion:normalize,"}) {
+    for (const char *service : {",effect:dropshadow,", ",effect:qtblend,", ",transition:qtblend,", ",conversion:avformat,", ",conversion:avcolor_space,", ",conversion:normalize,",
+                             ",conversion:stills,"}) {
         check(services.find(service) != std::string::npos, "settings host: %s is not in the services %s", service, host->services);
     }
     char text[1024];
@@ -1527,7 +1689,7 @@ void testSettingsFile(mlt_profile profile, bool expectGpu)
               && status.effects.find(",frei0r.sharpness,") != std::string::npos,
           "settings: effects missing from the GPU: %s", status.effects.c_str());
     check(status.transitions == ",,", "settings: transition:qtblend=off was not read: %s", status.transitions.c_str());
-    check(status.conversions == ",avcolor_space,normalize,", "settings: conversion:avformat=0 was not read: %s", status.conversions.c_str());
+    check(status.conversions == ",avcolor_space,normalize,stills,", "settings: conversion:avformat=0 was not read: %s", status.conversions.c_str());
     if (g_mock.active() && hasFilter("dropshadow") && hasFilter("boxblur")) {
         g_mock.reset();
         expectSame(profile, {{"dropshadow", {{"radius", "5"}}}}, makeImage(40, 30, 0), false);
@@ -1542,7 +1704,7 @@ void testSettingsFile(mlt_profile profile, bool expectGpu)
     host->reload_settings();
     status = moduleStatus(profile);
     check(status.enabled == 1 && status.effects.find(",dropshadow,") != std::string::npos && status.transitions == ",qtblend,"
-              && status.conversions == ",avformat,avcolor_space,normalize,",
+              && status.conversions == ",avformat,avcolor_space,normalize,stills,",
           "settings: the defaults did not come back without a file");
 
 #if !defined(_WIN32)
@@ -1736,6 +1898,7 @@ int main(int argc, char **argv)
     testProducer(profile);
     testDecoding(profile);
     testNormalizers(profile);
+    testStills(profile);
     testYuvOutput(profile);
     testGlobalSwitch(profile);
     testSettingsFile(profile, expectGpu);

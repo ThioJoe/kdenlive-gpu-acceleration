@@ -26,6 +26,7 @@
 #include "convert.h"
 #include "gpufx_log.h"
 #include "mlt_compat.h"
+#include "stills.h"
 
 #include <cstdio>
 #include <cstring>
@@ -80,11 +81,12 @@ int bridgeGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *format, i
 int bridgeTransitionGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *format, int *width, int *height, int writable);
 int decodeBridgeGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *format, int *width, int *height, int writable);
 int normalizerGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *format, int *width, int *height, int writable);
+int stillBridgeGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *format, int *width, int *height, int writable);
 
 bool isBridge(void *getImage)
 {
     return getImage == reinterpret_cast<void *>(&bridgeGetImage) || getImage == reinterpret_cast<void *>(&bridgeTransitionGetImage) ||
-           getImage == reinterpret_cast<void *>(&decodeBridgeGetImage);
+           getImage == reinterpret_cast<void *>(&decodeBridgeGetImage) || getImage == reinterpret_cast<void *>(&stillBridgeGetImage);
 }
 
 /** The get_image a tractor puts on its frame to fetch the image of a track's
@@ -1434,6 +1436,122 @@ int wrappedProducerGetFrame(mlt_producer producer, mlt_frame_ptr frame, int inde
     return result;
 }
 
+/* ==========================================================================
+ * Still producers (still images, titles, color clips): when the caller is
+ * on the GPU, a picture the producer has made twice for the same request is
+ * kept there, and the next frames get a copy of it with the frame changes
+ * of the producer's get_image, without the producer (see stills.h).
+ * ========================================================================== */
+
+struct StillWrapInfo
+{
+    int (*originalGetFrame)(mlt_producer, mlt_frame_ptr, int);
+    StillProducer still;
+};
+
+void destroyStillWrapInfo(void *data)
+{
+    delete static_cast<StillWrapInfo *>(data);
+}
+
+int stillBridgeGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *format, int *width, int *height, int writable)
+{
+    mlt_properties properties = MLT_FRAME_PROPERTIES(frame);
+    auto *info = static_cast<StillWrapInfo *>(mlt_frame_pop_service(frame));
+    const int entries = int(intptr_t(mlt_frame_pop_service(frame)));
+    auto producerGetImage = reinterpret_cast<mlt_get_image>(mlt_frame_pop_service(frame));
+    const bool callerWantsDevice = takeFlag(properties, kWantDevice);
+    // A request for YUV is answered by the producer itself
+    takeFlag(properties, kYuvRoundTrip);
+    if (!info || !producerGetImage) {
+        return 1;
+    }
+    StillProducer &still = info->still;
+    const char *service = still.descriptor().service;
+    if (!callerWantsDevice || *format != mlt_image_rgba || !moduleEnabled() || !serviceEnabled("conversion", "stills") || !still.enabled() ||
+        mlt_properties_get_int(MLT_PRODUCER_PROPERTIES(still.producer()), kForceCpu) || !Runtime::instance().usable()) {
+        return producerGetImage(frame, image, format, width, height, writable);
+    }
+
+    const std::string request = still.request(frame, *width, *height);
+    if (std::shared_ptr<const StillImage> picture = still.find(request)) {
+        const size_t bytes = size_t(picture->width) * size_t(picture->height) * 4;
+        DeviceBuffer copy;
+        CUresult res = CUDA_ERROR_NOT_INITIALIZED;
+        {
+            GpuScope scope;
+            if (scope.ok()) {
+                res = copy.allocate(bytes);
+                if (res == CUDA_SUCCESS) {
+                    res = scope.copy(copy.ptr(), picture->buffer.ptr(), bytes);
+                }
+                if (res == CUDA_SUCCESS) {
+                    res = scope.synchronize();
+                }
+            }
+        }
+        auto *tag = res == CUDA_SUCCESS ? static_cast<uint8_t *>(mlt_pool_alloc(int(bytes))) : nullptr;
+        if (tag) {
+            // The producer's own entries, which its get_image would consume
+            for (int i = 0; i < entries; ++i) {
+                mlt_frame_pop_service(frame);
+            }
+            picture->apply(frame);
+            // The host image stands for the GPU one
+            mlt_frame_set_image(frame, tag, int(bytes), mlt_pool_release);
+            auto handoff = std::make_unique<DeviceImage>();
+            handoff->buffer = std::move(copy);
+            handoff->width = picture->width;
+            handoff->height = picture->height;
+            handoff->tag = tag;
+            attachDeviceImage(properties, std::move(handoff));
+            *image = tag;
+            *format = mlt_image_rgba;
+            *width = picture->width;
+            *height = picture->height;
+            logDebug("%s: %dx%d picture copied on GPU", service, picture->width, picture->height);
+            return 0;
+        }
+        Runtime::instance().handleError(res == CUDA_SUCCESS ? CUDA_ERROR_OUT_OF_MEMORY : res, service);
+    }
+
+    FrameSnapshot before(frame);
+    const int error = producerGetImage(frame, image, format, width, height, writable);
+    if (!error && *image && *format == mlt_image_rgba && still.descriptor().still(still.producer(), frame)) {
+        if (mlt_properties changes = before.changes(frame)) {
+            // mlt_frame_get_alpha_size() hides the alpha plane of an RGBA image
+            int alphaSize = 0;
+            auto *alpha = static_cast<uint8_t *>(mlt_properties_get_data(properties, "alpha", &alphaSize));
+            still.record(request, *image, *width, *height, changes, alpha, alpha ? alphaSize : 0);
+        }
+    }
+    return error;
+}
+
+int wrappedStillGetFrame(mlt_producer producer, mlt_frame_ptr frame, int index)
+{
+    auto *info = static_cast<StillWrapInfo *>(mlt_properties_get_data(MLT_PRODUCER_PROPERTIES(producer), kWrapProperty, nullptr));
+    if (!info) {
+        return 1;
+    }
+    const int result = info->originalGetFrame(producer, frame, index);
+    if (result || !frame || !*frame || !moduleEnabled()) {
+        return result;
+    }
+    // The new frame holds the producer's entries and its get_image on top:
+    // [entries..., get_image, entry count, wrap info, stillBridgeGetImage]
+    mlt_deque stack = MLT_FRAME_IMAGE_STACK(*frame);
+    const int count = mlt_deque_count(stack);
+    if (count >= 1 && count <= 3) {
+        void *getImage = mlt_deque_pop_back(stack);
+        mlt_frame_push_service(*frame, getImage);
+        mlt_frame_push_service(*frame, reinterpret_cast<void *>(intptr_t(count - 1)));
+        mlt_frame_push_service(*frame, info);
+        mlt_frame_push_get_image(*frame, stillBridgeGetImage);
+    }
+    return result;
+}
+
 } // namespace
 
 void wrapTransition(mlt_transition transition, const TransitionDescriptor &descriptor)
@@ -1474,6 +1592,16 @@ void wrapProducer(mlt_producer producer)
     auto *info = new ProducerWrapInfo{producer->get_frame};
     mlt_properties_set_data(MLT_PRODUCER_PROPERTIES(producer), kWrapProperty, info, 0, destroyProducerWrapInfo, nullptr);
     producer->get_frame = wrappedProducerGetFrame;
+}
+
+void wrapStill(mlt_producer producer, const StillDescriptor &descriptor)
+{
+    if (!producer || !producer->get_frame || producer->get_frame == wrappedStillGetFrame) {
+        return;
+    }
+    auto *info = new StillWrapInfo{producer->get_frame, StillProducer(producer, descriptor)};
+    mlt_properties_set_data(MLT_PRODUCER_PROPERTIES(producer), kWrapProperty, info, 0, destroyStillWrapInfo, nullptr);
+    producer->get_frame = wrappedStillGetFrame;
 }
 
 } // namespace gpufx

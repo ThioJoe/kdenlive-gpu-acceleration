@@ -16,7 +16,8 @@
  * decoded 4:2:0 YUV video of avformat producers to RGBA, and RGBA results to
  * the packed 4:2:2 YUV that consumers ask for (MLT's avcolour_space). And it
  * lets images on the GPU through the normalizing filters MLT puts after the
- * producers (see normalizer.h).
+ * producers (see normalizer.h), and keeps the pictures of still images,
+ * titles and color clips there (see stills.h).
  *
  * Runtime switches:
  *  - environment MLT_GPUFX=0: do not touch any filter
@@ -152,13 +153,15 @@ void onProducerCreated(mlt_properties, void *, mlt_event_data eventData)
     mlt_producer producer = *static_cast<mlt_producer *>(data->service);
     if (producer && (!strcmp(data->name, "avformat") || !strcmp(data->name, "avformat-novalidate"))) {
         wrapProducer(producer);
+    } else if (const StillDescriptor *still = producer ? findStill(data->name) : nullptr) {
+        wrapStill(producer, *still);
     }
 }
 
 std::string conversionList()
 {
     std::string list;
-    for (const char *service : {"avformat", "avcolor_space", "normalize"}) {
+    for (const char *service : {"avformat", "avcolor_space", "normalize", "stills"}) {
         if (!serviceEnabled("conversion", service)) {
             continue;
         }
@@ -210,7 +213,7 @@ std::string serviceList()
     for (const TransitionDescriptor *transition : transitionRegistry()) {
         list += std::string(",transition:") + transition->service;
     }
-    return list + ",conversion:avformat,conversion:avcolor_space,conversion:normalize";
+    return list + ",conversion:avformat,conversion:avcolor_space,conversion:normalize,conversion:stills";
 }
 
 /** One line of text for the description of the GPU */

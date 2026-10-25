@@ -7,6 +7,7 @@
 
 #include "effect.h"
 #include "normalizer.h"
+#include "stills.h"
 
 #include <framework/mlt.h>
 
@@ -22,11 +23,14 @@ void wrapProducer(mlt_producer producer);
 /** The same for one of MLT's normalizing filters, which lets GPU images
  *  through (see normalizer.h). */
 void wrapNormalizer(mlt_filter filter, const NormalizerDescriptor &descriptor);
+/** The same for a producer whose picture stays the same, which the bridge
+ *  then keeps on the GPU (see stills.h). */
+void wrapStill(mlt_producer producer, const StillDescriptor &descriptor);
 
 /** Module wide switches (environment, settings, MLT global properties, per
  *  service). kind is "effect", "transition" or "conversion" (avformat for the
  *  decoding to RGBA, avcolor_space for the conversion to YUV, normalize for
- *  MLT's normalizing filters). */
+ *  MLT's normalizing filters, stills for the pictures kept on the GPU). */
 bool moduleEnabled();
 bool serviceEnabled(const char *kind, const char *service);
 bool effectEnabled(const EffectDescriptor &effect);
