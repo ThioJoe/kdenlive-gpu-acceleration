@@ -1365,6 +1365,61 @@ void testSettingsFile(mlt_profile profile, bool expectGpu)
     check(status.enabled == 1 && status.effects.find(",dropshadow,") != std::string::npos && status.transitions == ",qtblend,"
               && status.conversions == ",avformat,avcolor_space,",
           "settings: the defaults did not come back without a file");
+
+#if !defined(_WIN32)
+    // Without GPUFX_CONFIG_FILE: Kdenlive's file in XDG_CONFIG_HOME, named
+    // after the package Kdenlive's PACKAGE_TYPE names, else kdenlive-appimagerc
+    // when the module is in an extracted AppImage. Each file keeps one effect
+    // on the CPU, which tells which one was read.
+    const std::string config = g_settingsFile + ".d";
+    std::filesystem::create_directories(config);
+    writeText(config + "/kdenliverc", "[gpufx]\neffect:dropshadow=false\n");
+    writeText(config + "/kdenlive-appimagerc", "[gpufx]\neffect:box_blur=false\n");
+    writeText(config + "/kdenlive-flatpakrc", "[gpufx]\neffect:boxblur=false\n");
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    const std::string savedXdg = xdg ? xdg : "";
+    const char *packageType = getenv("PACKAGE_TYPE");
+    const std::string savedPackageType = packageType ? packageType : "";
+    unsetenv("GPUFX_CONFIG_FILE");
+    setenv("XDG_CONFIG_HOME", config.c_str(), 1);
+    auto offEffect = [&]() {
+        const std::string effects = moduleStatus(profile).effects;
+        for (const char *effect : {"dropshadow", "box_blur", "boxblur"}) {
+            if (effects.find(std::string(",") + effect + ",") == std::string::npos) {
+                return std::string(effect);
+            }
+        }
+        return std::string("none");
+    };
+    setenv("PACKAGE_TYPE", "AppImage", 1);
+    host->reload_settings();
+    std::string off = offEffect();
+    check(off == "box_blur", "settings: kdenlive-appimagerc not read with PACKAGE_TYPE=AppImage (%s off)", off.c_str());
+    setenv("PACKAGE_TYPE", "flatpak", 1);
+    host->reload_settings();
+    off = offEffect();
+    check(off == "boxblur", "settings: kdenlive-flatpakrc not read with PACKAGE_TYPE=flatpak (%s off)", off.c_str());
+    unsetenv("PACKAGE_TYPE");
+    Dl_info info{};
+    const bool inAppImage = dladdr(reinterpret_cast<void *>(getHost), &info) && info.dli_fname
+                            && std::filesystem::exists(std::filesystem::path(info.dli_fname).parent_path() / "../../../AppRun");
+    host->reload_settings();
+    off = offEffect();
+    check(off == (inAppImage ? "box_blur" : "dropshadow"), "settings: %s not read without PACKAGE_TYPE (%s off)",
+          inAppImage ? "kdenlive-appimagerc" : "kdenliverc", off.c_str());
+
+    std::filesystem::remove_all(config);
+    if (packageType) {
+        setenv("PACKAGE_TYPE", savedPackageType.c_str(), 1);
+    }
+    if (xdg) {
+        setenv("XDG_CONFIG_HOME", savedXdg.c_str(), 1);
+    } else {
+        unsetenv("XDG_CONFIG_HOME");
+    }
+    setenv("GPUFX_CONFIG_FILE", g_settingsFile.c_str(), 1);
+    host->reload_settings();
+#endif
 }
 
 /** GPU processing turned off in the settings when the module was loaded */

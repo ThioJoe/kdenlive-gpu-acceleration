@@ -29,8 +29,9 @@ const FileSettings &fileSettings();
 
 /** Reads the settings file: GPUFX_CONFIG_FILE, or else Kdenlive's settings
  *  file, kdenliverc in the user's configuration folder (%LOCALAPPDATA% on
- *  Windows, $XDG_CONFIG_HOME or ~/.config elsewhere). A missing file or group
- *  means the defaults. */
+ *  Windows, $XDG_CONFIG_HOME or ~/.config elsewhere), which Kdenlive's
+ *  AppImage names kdenlive-appimagerc. A missing file or group means the
+ *  defaults. */
 void reloadFileSettings();
 
 /** True when the settings page is to be loaded in this process: in

@@ -53,6 +53,31 @@ std::string displayPath(const NativePath &path)
 #endif
 }
 
+NativePath moduleDirectory();
+
+#if !defined(_WIN32)
+/** The name of Kdenlive's settings file: kdenlive-<package>rc for its
+ *  AppImage, Flatpak and Snap packages, which set PACKAGE_TYPE */
+std::string kdenliveFileName()
+{
+    if (const char *type = getenv("PACKAGE_TYPE")) {
+        std::string package(type);
+        std::transform(package.begin(), package.end(), package.begin(), [](unsigned char c) { return char(tolower(c)); });
+        if (package == "appimage" || package == "flatpak" || package == "snap") {
+            return "kdenlive-" + package + "rc";
+        }
+    }
+    // Programs started from an extracted AppImage without its AppRun, like
+    // its melt, use the file of the AppImage's Kdenlive: the module is in
+    // <AppImage>/usr/lib/mlt-7
+    const std::string directory = moduleDirectory();
+    if (!directory.empty() && access((directory + "/../../../AppRun").c_str(), F_OK) == 0) {
+        return "kdenlive-appimagerc";
+    }
+    return "kdenliverc";
+}
+#endif
+
 NativePath settingsFilePath()
 {
 #if defined(_WIN32)
@@ -72,11 +97,11 @@ NativePath settingsFilePath()
     }
     const char *config = getenv("XDG_CONFIG_HOME");
     if (config && config[0] == '/') {
-        return std::string(config) + "/kdenliverc";
+        return std::string(config) + "/" + kdenliveFileName();
     }
     const char *home = getenv("HOME");
     if (home && *home) {
-        return std::string(home) + "/.config/kdenliverc";
+        return std::string(home) + "/.config/" + kdenliveFileName();
     }
 #endif
     return {};
