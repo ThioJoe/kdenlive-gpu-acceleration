@@ -34,7 +34,7 @@ Or let [Tools/Install-Gpufx.ps1](Tools/Install-Gpufx.ps1) download the latest
 release for your Kdenlive version and copy both files, given the Kdenlive folder:
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Tools\Install-Gpufx.ps1 "C:\path\to\kdenlive-26.08.1_standalone"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Tools\Install-Gpufx.ps1 "C:\path\to\kdenlive-26.08.2_standalone"
 ```
 
 ## Installing on Linux
@@ -322,7 +322,8 @@ the tests inside that build with the emulated GPU, then starts Kdenlive itself
 with a variant of the page that opens Kdenlive's settings dialog, shows the
 page and takes a screenshot. It uploads both libraries in a
 `kdenlive-<version>_standalone` folder that merges into an installed one, and
-the screenshots of the settings page. Run it by hand (*Actions > Run
+the screenshots of the settings page. Both workflows build for the Kdenlive
+release in `.github/kdenlive-version`; run one by hand (*Actions > Run
 workflow*) to build for another Kdenlive version.
 
 The Linux workflow does the same for Kdenlive's AppImage. It builds the

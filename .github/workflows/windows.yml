@@ -16,9 +16,9 @@ on:
   workflow_dispatch:
     inputs:
       kdenlive_version:
-        description: Kdenlive release whose Windows standalone build the module is tested with and laid out for
-        required: true
-        default: '26.08.1'
+        description: Kdenlive release whose Windows standalone build the module is tested with and laid out for (empty for the one in .github/kdenlive-version)
+        required: false
+        default: ''
   push:
   pull_request:
 
@@ -26,14 +26,16 @@ permissions:
   contents: read
 
 env:
-  KDENLIVE_VERSION: ${{ inputs.kdenlive_version || '26.08.1' }}
+  # KDENLIVE_VERSION is set by the first step: the release in
+  # .github/kdenlive-version, which the Windows and Linux workflows share,
+  # unless another one is given when the workflow is run by hand
   # MLT headers to compile with. The module adapts to the version of the MLT
   # it is loaded into at runtime.
   MLT_HEADERS: v7.42.0
 
 jobs:
   windows:
-    name: Build and test with Kdenlive ${{ inputs.kdenlive_version || '26.08.1' }}
+    name: Build and test
     runs-on: windows-latest
     timeout-minutes: 45
     env:
@@ -50,12 +52,16 @@ jobs:
         shell: bash
         env:
           TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.kdenlive_version }}
         run: |
           git init -q source
           auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
           git -C source -c http.extraheader="$auth" fetch -q --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_SHA"
           git -C source checkout -q FETCH_HEAD
           git clone -q --depth 1 --branch "$MLT_HEADERS" https://github.com/mltframework/mlt.git mlt
+          version="${REQUESTED_VERSION:-$(tr -d ' \r\n' < source/.github/kdenlive-version)}"
+          echo "Kdenlive $version"
+          echo "KDENLIVE_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Get Kdenlive's standalone build
         shell: pwsh
