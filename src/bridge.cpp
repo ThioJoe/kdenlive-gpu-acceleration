@@ -79,6 +79,7 @@ void destroyDeviceImageBox(void *data)
 int bridgeGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *format, int *width, int *height, int writable);
 int bridgeTransitionGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *format, int *width, int *height, int writable);
 int decodeBridgeGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *format, int *width, int *height, int writable);
+int normalizerGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *format, int *width, int *height, int writable);
 
 bool isBridge(void *getImage)
 {
@@ -124,11 +125,13 @@ void *tractorGetImage()
 
 /** The frame on which to request a GPU image, for the image that the
  *  get_image at depth (0 = top) of frame's stack delivers: frame itself if
- *  that get_image is a bridge, or the track frame below the get_image of one
- *  or more tractors if its next get_image is one. Null if the image comes from
- *  the CPU. */
+ *  that get_image is a bridge, or normalizing filters that let the image of
+ *  a bridge through, or the track frame below the get_image of one or more
+ *  tractors if its next get_image is one. Null if the image comes from the
+ *  CPU. */
 mlt_frame gpuSource(mlt_frame frame, int depth)
 {
+    bool throughNormalizer = false;
     for (int level = 0; level < 16; ++level) {
         mlt_deque stack = MLT_FRAME_IMAGE_STACK(frame);
         const int count = mlt_deque_count(stack);
@@ -139,7 +142,15 @@ mlt_frame gpuSource(mlt_frame frame, int depth)
         if (isBridge(getImage)) {
             return frame;
         }
-        if (count < depth + 2 || getImage != tractorGetImage()) {
+        if (getImage == reinterpret_cast<void *>(&normalizerGetImage) && count > depth + 2) {
+            // [CPU entries, CPU get_image, entry count, wrap info, normalizerGetImage]:
+            // the image comes from the next get_image below
+            depth += 4 + int(intptr_t(mlt_deque_peek(stack, count - 3 - depth)));
+            throughNormalizer = true;
+            continue;
+        }
+        // The request goes to the frame of the top normalizer, which passes it on
+        if (throughNormalizer || count < depth + 2 || getImage != tractorGetImage()) {
             return nullptr;
         }
         frame = static_cast<mlt_frame>(mlt_deque_peek(stack, count - 2 - depth));
@@ -1103,6 +1114,154 @@ mlt_frame wrappedProcess(mlt_filter filter, mlt_frame frame)
 }
 
 /* ==========================================================================
+ * Normalizing filters (see normalizer.h)
+ * ========================================================================== */
+
+struct NormalizerWrapInfo
+{
+    mlt_frame (*originalProcess)(mlt_filter, mlt_frame);
+    const NormalizerDescriptor *descriptor;
+};
+
+void destroyNormalizerWrapInfo(void *data)
+{
+    delete static_cast<NormalizerWrapInfo *>(data);
+}
+
+int normalizerGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *format, int *width, int *height, int writable)
+{
+    mlt_properties properties = MLT_FRAME_PROPERTIES(frame);
+    auto *info = static_cast<NormalizerWrapInfo *>(mlt_frame_pop_service(frame));
+    const int entries = int(intptr_t(mlt_frame_pop_service(frame)));
+    auto cpuGetImage = reinterpret_cast<mlt_get_image>(mlt_frame_pop_service(frame));
+    const bool callerWantsDevice = takeFlag(properties, kWantDevice);
+    takeFlag(properties, kYuvRoundTrip);
+    if (!info || !cpuGetImage) {
+        return 1;
+    }
+    const NormalizerDescriptor &descriptor = *info->descriptor;
+    // Only worth it when the image below is on the GPU and stays there
+    mlt_frame lowerSource = callerWantsDevice && *format == mlt_image_rgba && moduleEnabled() && serviceEnabled("conversion", "normalize")
+                                ? gpuSource(frame, entries)
+                                : nullptr;
+    if (!lowerSource) {
+        return cpuGetImage(frame, image, format, width, height, writable);
+    }
+    NormalizerCall call;
+    call.frame = frame;
+    call.properties = properties;
+    mlt_deque stack = MLT_FRAME_IMAGE_STACK(frame);
+    const int count = mlt_deque_count(stack);
+    for (int i = 0; i < entries && i < 2; ++i) {
+        call.entries[i] = mlt_deque_peek(stack, count - 1 - i);
+    }
+    call.width = *width;
+    call.height = *height;
+    if (!descriptor.before(call)) {
+        return cpuGetImage(frame, image, format, width, height, writable);
+    }
+    // The CPU filter's own entries
+    for (int i = 0; i < entries; ++i) {
+        mlt_frame_pop_service(frame);
+    }
+
+    uint8_t *fetched = nullptr;
+    mlt_image_format fetchedFormat = mlt_image_rgba;
+    int w = call.fetchWidth;
+    int h = call.fetchHeight;
+    const int error = fetchImage(frame, lowerSource, &fetched, &fetchedFormat, &w, &h, writable);
+    if (error || !fetched || fetchedFormat != mlt_image_rgba) {
+        *image = fetched;
+        *format = fetchedFormat;
+        *width = w;
+        *height = h;
+        return error ? error : (fetched ? 0 : 1);
+    }
+    if (descriptor.after(call, w, h)) {
+        // Unchanged: a GPU image goes on to the caller as it is
+        *image = fetched;
+        *format = mlt_image_rgba;
+        *width = call.outWidth;
+        *height = call.outHeight;
+        return 0;
+    }
+
+    FetchedImage input;
+    input.host = fetched;
+    input.width = w;
+    input.height = h;
+    input.device = takeDeviceImage(properties, fetched, w, h, mlt_image_rgba);
+    if (input.device && descriptor.gpuWork) {
+        Runtime &runtime = Runtime::instance();
+        GpuScope scope;
+        DeviceBuffer out;
+        CUresult res = scope.ok() ? CUDA_SUCCESS : CUDA_ERROR_NOT_INITIALIZED;
+        if (res == CUDA_SUCCESS && descriptor.gpuWork(call, scope, input.device->buffer.ptr(), w, h, out, res)) {
+            if (res == CUDA_SUCCESS) {
+                res = scope.synchronize();
+            }
+            const int outBytes = call.outWidth * call.outHeight * 4;
+            auto *tag = res == CUDA_SUCCESS ? static_cast<uint8_t *>(mlt_pool_alloc(outBytes)) : nullptr;
+            if (tag) {
+                // The host image stands for the GPU one
+                mlt_frame_set_image(frame, tag, outBytes, mlt_pool_release);
+                auto handoff = std::make_unique<DeviceImage>();
+                handoff->buffer = std::move(out);
+                handoff->width = call.outWidth;
+                handoff->height = call.outHeight;
+                handoff->tag = tag;
+                attachDeviceImage(properties, std::move(handoff));
+                *image = tag;
+                *format = mlt_image_rgba;
+                *width = call.outWidth;
+                *height = call.outHeight;
+                logDebug("%s: %dx%d -> %dx%d on GPU", descriptor.service, w, h, call.outWidth, call.outHeight);
+                return 0;
+            }
+            runtime.handleError(res == CUDA_SUCCESS ? CUDA_ERROR_OUT_OF_MEMORY : res, descriptor.service);
+        }
+    }
+    // The CPU filter's work, on the image in memory
+    if (!ensureHost(frame, input)) {
+        logError("%s: lost the GPU image", descriptor.service);
+        return 1;
+    }
+    *image = input.host;
+    *format = mlt_image_rgba;
+    *width = w;
+    *height = h;
+    if (!descriptor.work) {
+        return 0;
+    }
+    logDebug("%s: %dx%d changed on the CPU", descriptor.service, w, h);
+    return descriptor.work(call, image, width, height);
+}
+
+mlt_frame wrappedNormalizerProcess(mlt_filter filter, mlt_frame frame)
+{
+    auto *info = static_cast<NormalizerWrapInfo *>(mlt_properties_get_data(MLT_FILTER_PROPERTIES(filter), kWrapProperty, nullptr));
+    if (!info) {
+        return frame;
+    }
+    mlt_deque stack = MLT_FRAME_IMAGE_STACK(frame);
+    const int before = mlt_deque_count(stack);
+    mlt_frame result = info->originalProcess(filter, frame);
+    if (result != frame || !moduleEnabled()) {
+        return result;
+    }
+    // The CPU filter pushed its entries and its get_image: unless the layout
+    // is another one, insert the bridge on top
+    if (mlt_deque_count(stack) - before == info->descriptor->entries + 1) {
+        void *cpuGetImage = mlt_deque_pop_back(stack);
+        mlt_frame_push_service(frame, cpuGetImage);
+        mlt_frame_push_service(frame, reinterpret_cast<void *>(intptr_t(info->descriptor->entries)));
+        mlt_frame_push_service(frame, info);
+        mlt_frame_push_get_image(frame, normalizerGetImage);
+    }
+    return result;
+}
+
+/* ==========================================================================
  * Decoding
  *
  * MLT's avformat producer converts each decoded picture to the format its
@@ -1295,6 +1454,16 @@ void wrapFilter(mlt_filter filter, const EffectDescriptor &effect)
     auto *info = new WrapInfo{filter->process, &effect};
     mlt_properties_set_data(MLT_FILTER_PROPERTIES(filter), kWrapProperty, info, 0, destroyWrapInfo, nullptr);
     filter->process = wrappedProcess;
+}
+
+void wrapNormalizer(mlt_filter filter, const NormalizerDescriptor &descriptor)
+{
+    if (!filter || !filter->process || filter->process == wrappedNormalizerProcess) {
+        return;
+    }
+    auto *info = new NormalizerWrapInfo{filter->process, &descriptor};
+    mlt_properties_set_data(MLT_FILTER_PROPERTIES(filter), kWrapProperty, info, 0, destroyNormalizerWrapInfo, nullptr);
+    filter->process = wrappedNormalizerProcess;
 }
 
 void wrapProducer(mlt_producer producer)

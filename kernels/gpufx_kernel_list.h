@@ -31,4 +31,5 @@
     X(gpufx_alpha_check)                                                                                                                                       \
     X(gpufx_yuv420_to_rgba)                                                                                                                                    \
     X(gpufx_rgba_to_yuyv422)                                                                                                                                   \
-    X(gpufx_yuyv422_to_rgba)
+    X(gpufx_yuyv422_to_rgba)                                                                                                                                   \
+    X(gpufx_pad_rgba)

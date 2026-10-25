@@ -14,7 +14,9 @@
  *
  * It also takes over two image conversions MLT does with libswscale: the
  * decoded 4:2:0 YUV video of avformat producers to RGBA, and RGBA results to
- * the packed 4:2:2 YUV that consumers ask for (MLT's avcolour_space).
+ * the packed 4:2:2 YUV that consumers ask for (MLT's avcolour_space). And it
+ * lets images on the GPU through the normalizing filters MLT puts after the
+ * producers (see normalizer.h).
  *
  * Runtime switches:
  *  - environment MLT_GPUFX=0: do not touch any filter
@@ -123,6 +125,8 @@ void onFilterCreated(mlt_properties, void *, mlt_event_data eventData)
     const EffectDescriptor *effect = filter ? findEffect(data->name) : nullptr;
     if (effect) {
         wrapFilter(filter, *effect);
+    } else if (const NormalizerDescriptor *normalizer = filter ? findNormalizer(data->name) : nullptr) {
+        wrapNormalizer(filter, *normalizer);
     }
 }
 
@@ -154,7 +158,7 @@ void onProducerCreated(mlt_properties, void *, mlt_event_data eventData)
 std::string conversionList()
 {
     std::string list;
-    for (const char *service : {"avformat", "avcolor_space"}) {
+    for (const char *service : {"avformat", "avcolor_space", "normalize"}) {
         if (!serviceEnabled("conversion", service)) {
             continue;
         }
@@ -206,7 +210,7 @@ std::string serviceList()
     for (const TransitionDescriptor *transition : transitionRegistry()) {
         list += std::string(",transition:") + transition->service;
     }
-    return list + ",conversion:avformat,conversion:avcolor_space";
+    return list + ",conversion:avformat,conversion:avcolor_space,conversion:normalize";
 }
 
 /** One line of text for the description of the GPU */

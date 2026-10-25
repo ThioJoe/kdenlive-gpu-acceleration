@@ -1152,6 +1152,104 @@ void testDecoding(mlt_profile profile)
     }
 }
 
+/** The image of a video clip as Kdenlive makes it: an MLT chain with the
+ *  normalizers MLT attaches, and the filters on the chain. */
+Output decodeChain(mlt_profile profile, const std::string &path, bool cpu, const std::vector<FilterSpec> &specs, const Properties &frameProperties = {})
+{
+    Output output;
+    mlt_chain chain = mlt_chain_init(profile);
+    mlt_producer source = chain ? mlt_factory_producer(profile, "avformat", path.c_str()) : nullptr;
+    if (!source) {
+        fprintf(stderr, "cannot open %s\n", path.c_str());
+        mlt_chain_close(chain);
+        return output;
+    }
+    mlt_properties_set_int(MLT_PRODUCER_PROPERTIES(source), "_gpufx.disable", cpu ? 1 : 0);
+    mlt_chain_set_source(chain, source);
+    mlt_producer_close(source);
+    mlt_chain_attach_normalizers(chain);
+    std::vector<mlt_filter> filters = createFilters(profile, specs, cpu);
+    for (mlt_filter filter : filters) {
+        mlt_service_attach(MLT_CHAIN_SERVICE(chain), filter);
+    }
+    mlt_frame frame = nullptr;
+    mlt_service_get_frame(MLT_CHAIN_SERVICE(chain), &frame, 0);
+    if (frame) {
+        for (const auto &property : frameProperties) {
+            mlt_properties_set(MLT_FRAME_PROPERTIES(frame), property.first, property.second.c_str());
+        }
+        output = fetchOutput(frame, mlt_image_rgba, profile->width, profile->height);
+        mlt_frame_close(frame);
+    }
+    for (mlt_filter filter : filters) {
+        mlt_filter_close(filter);
+    }
+    mlt_chain_close(chain);
+    return output;
+}
+
+/** MLT's normalizing filters between a decoded video and its effects */
+void testNormalizers(mlt_profile profile)
+{
+    mlt_chain probe = mlt_chain_init(profile);
+    mlt_producer color = probe ? mlt_factory_producer(profile, "color", "black") : nullptr;
+    int links = 0;
+    if (color) {
+        mlt_chain_set_source(probe, color);
+        mlt_producer_close(color);
+        mlt_chain_attach_normalizers(probe);
+        links = mlt_chain_link_count(probe);
+    }
+    mlt_chain_close(probe);
+    // An effect whose GPU result is exact, which also blurs the padding in
+    const std::vector<FilterSpec> blur = {{"box_blur", {{"hradius", "4"}, {"vradius", "3"}}}};
+    if (!links || !mlt_properties_get_data(mlt_repository_producers(mlt_factory_repository()), "avformat", nullptr) || !hasFilters(blur)) {
+        printf("SKIP: no avformat producer, normalizers or box_blur filter\n");
+        return;
+    }
+    struct Case
+    {
+        const char *name;
+        int width, height;
+        const char *parameters;
+        Properties frame;
+        // The decoded image goes into the effect on the GPU
+        bool staysOnGpu;
+    };
+    const Case cases[] = {
+        {"same size", 160, 90, "Ip", {}, true},
+        // resize pads the narrower image on the GPU
+        {"pillarbox", 120, 90, "Ip", {}, true},
+        {"letterbox", 160, 72, "Ip", {}, true},
+        // rescale scales with swscale on the CPU
+        {"scaled", 320, 180, "Ip", {}, false},
+        // fieldorder shifts the image by a line on the CPU
+        {"field order", 160, 90, "It", {{"consumer.top_field_first", "0"}}, false},
+    };
+    for (const Case &c : cases) {
+        const std::string path = tempPath(std::string("gpufx_normalize_") + std::to_string(c.width) + "x" + std::to_string(c.height) + ".y4m");
+        if (!writeY4m(path, c.width, c.height, 1, c.parameters)) {
+            check(false, "normalizers: cannot write %s", path.c_str());
+            continue;
+        }
+        const std::string what = std::string("normalizers, ") + c.name;
+        g_mock.reset();
+        const Output gpu = decodeChain(profile, path, false, blur, c.frame);
+        const MockCudaStats stats = g_mock.stats();
+        const Output cpu = decodeChain(profile, path, true, blur, c.frame);
+        expectSameOutput(cpu, gpu, what);
+        check(gpu.width == profile->width && gpu.height == profile->height, "%s: %dx%d", what.c_str(), gpu.width, gpu.height);
+        if (g_mock.active() && c.staysOnGpu) {
+            const uint64_t yuvBytes = uint64_t(c.width) * uint64_t(c.height) * 3 / 2;
+            check(stats.downloads == 1 && stats.uploadedBytes < yuvBytes + 16384, "%s: %llu downloads, %llu bytes uploaded", what.c_str(),
+                  (unsigned long long)stats.downloads, (unsigned long long)stats.uploadedBytes);
+        }
+        // Without effects, nothing changes
+        expectSameOutput(decodeChain(profile, path, true, {}, c.frame), decodeChain(profile, path, false, {}, c.frame), what + " without effects");
+        remove(path.c_str());
+    }
+}
+
 /** Filters on a producer, whose image is requested in format. MLT's
  *  avcolour_space converts it, as when the loader normalizes a producer. */
 Output renderFormat(mlt_profile profile, const std::vector<FilterSpec> &specs, const Image &input, bool cpu, mlt_image_format format,
@@ -1375,7 +1473,7 @@ void testSettingsFile(mlt_profile profile, bool expectGpu)
     }
     check(host->version == GPUFX_SETTINGS_API_VERSION && !strcmp(host->group, "gpufx"), "settings host: version %d, group %s", host->version, host->group);
     const std::string services = std::string(",") + host->services + ",";
-    for (const char *service : {",effect:dropshadow,", ",effect:qtblend,", ",transition:qtblend,", ",conversion:avformat,", ",conversion:avcolor_space,"}) {
+    for (const char *service : {",effect:dropshadow,", ",effect:qtblend,", ",transition:qtblend,", ",conversion:avformat,", ",conversion:avcolor_space,", ",conversion:normalize,"}) {
         check(services.find(service) != std::string::npos, "settings host: %s is not in the services %s", service, host->services);
     }
     char text[1024];
@@ -1411,7 +1509,7 @@ void testSettingsFile(mlt_profile profile, bool expectGpu)
               && status.effects.find(",frei0r.sharpness,") != std::string::npos,
           "settings: effects missing from the GPU: %s", status.effects.c_str());
     check(status.transitions == ",,", "settings: transition:qtblend=off was not read: %s", status.transitions.c_str());
-    check(status.conversions == ",avcolor_space,", "settings: conversion:avformat=0 was not read: %s", status.conversions.c_str());
+    check(status.conversions == ",avcolor_space,normalize,", "settings: conversion:avformat=0 was not read: %s", status.conversions.c_str());
     if (g_mock.active() && hasFilter("dropshadow") && hasFilter("boxblur")) {
         g_mock.reset();
         expectSame(profile, {{"dropshadow", {{"radius", "5"}}}}, makeImage(40, 30, 0), false);
@@ -1426,7 +1524,7 @@ void testSettingsFile(mlt_profile profile, bool expectGpu)
     host->reload_settings();
     status = moduleStatus(profile);
     check(status.enabled == 1 && status.effects.find(",dropshadow,") != std::string::npos && status.transitions == ",qtblend,"
-              && status.conversions == ",avformat,avcolor_space,",
+              && status.conversions == ",avformat,avcolor_space,normalize,",
           "settings: the defaults did not come back without a file");
 
 #if !defined(_WIN32)
@@ -1619,6 +1717,7 @@ int main(int argc, char **argv)
     testChains(profile);
     testProducer(profile);
     testDecoding(profile);
+    testNormalizers(profile);
     testYuvOutput(profile);
     testGlobalSwitch(profile);
     testSettingsFile(profile, expectGpu);

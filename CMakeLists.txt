@@ -143,6 +143,7 @@ add_library(mltgpufx MODULE
     src/effect_qtblend.cpp
     src/gpu_runtime.cpp
     src/module.cpp
+    src/normalizers.cpp
     src/qt_draw.cpp
     src/qt_raster.cpp
     src/settings_file.cpp

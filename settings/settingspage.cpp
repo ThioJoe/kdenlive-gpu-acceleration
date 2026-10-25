@@ -155,6 +155,8 @@ const std::vector<Service> &services()
                     service.label = QStringLiteral("Video decoding to RGBA");
                 } else if (service.service == QLatin1String("avcolor_space")) {
                     service.label = QStringLiteral("Output conversion to YUV");
+                } else if (service.service == QLatin1String("normalize")) {
+                    service.label = QStringLiteral("Clip size and field order (MLT's normalizing filters)");
                 }
             } else {
                 const QStringList names = (service.kind == QLatin1String("transition") ? transitions : effects).value(service.service);

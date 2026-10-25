@@ -1139,3 +1139,19 @@ GPUFX_KERNEL void gpufx_yuyv422_to_rgba(const gpufx_u8 *__restrict__ src, const 
     }
     dst[pixel] = gpufx_pack(gpufx_u32(R >> 22), gpufx_u32(G >> 22), gpufx_u32(B >> 22), alphaSrc[pixel] >> 24);
 }
+
+/* An RGBA image placed at (offsetX, offsetY) in a larger one filled with
+ * fill, as MLT's resize filter pads images (resize_image()). */
+GPUFX_KERNEL void gpufx_pad_rgba(const gpufx_u32 *__restrict__ src, int srcWidth, int srcHeight, gpufx_u32 *__restrict__ dst, int w, int h, int offsetX,
+                                 int offsetY, gpufx_u32 fill)
+{
+    const int x = GPUFX_GLOBAL_X;
+    const int y = GPUFX_GLOBAL_Y;
+    if (x >= w || y >= h) {
+        return;
+    }
+    const int sx = x - offsetX;
+    const int sy = y - offsetY;
+    const bool inside = sx >= 0 && sx < srcWidth && sy >= 0 && sy < srcHeight;
+    dst[size_t(y) * size_t(w) + size_t(x)] = inside ? src[size_t(sy) * size_t(srcWidth) + size_t(sx)] : fill;
+}
