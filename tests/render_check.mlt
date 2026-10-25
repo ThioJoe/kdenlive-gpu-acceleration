@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SPDX-FileCopyrightText: 2026 ThioJoe
+    SPDX-License-Identifier: GPL-3.0-only
+
+    A project rendered with melt with and without the GPU by the Linux
+    workflow: a video clip under a color clip with Transform and Drop Shadow,
+    composited as Kdenlive does it (no rectangle). render_check.y4m is made
+    by the workflow.
+-->
+<mlt LC_NUMERIC="C">
+  <profile description="360p 30" width="640" height="360" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="16" display_aspect_den="9" frame_rate_num="30" frame_rate_den="1" colorspace="709"/>
+  <producer id="video" in="0" out="29">
+    <property name="mlt_service">avformat</property>
+    <property name="resource">render_check.y4m</property>
+  </producer>
+  <producer id="card" in="0" out="29">
+    <property name="mlt_service">color</property>
+    <property name="resource">0xffcc33ff</property>
+    <property name="length">30</property>
+  </producer>
+  <playlist id="v1">
+    <entry producer="video" in="0" out="29"/>
+  </playlist>
+  <playlist id="v2">
+    <entry producer="card" in="0" out="29">
+      <filter>
+        <property name="mlt_service">qtblend</property>
+        <property name="rect">0=60 40 280 160 1;29=300 160 280 160 0.8</property>
+        <property name="rotation">0=0;29=30</property>
+      </filter>
+      <filter>
+        <property name="mlt_service">dropshadow</property>
+        <property name="radius">4</property>
+        <property name="x">6</property>
+        <property name="y">6</property>
+      </filter>
+    </entry>
+  </playlist>
+  <tractor id="main" in="0" out="29">
+    <multitrack>
+      <track producer="v1"/>
+      <track producer="v2"/>
+    </multitrack>
+    <transition>
+      <property name="mlt_service">qtblend</property>
+      <property name="a_track">0</property>
+      <property name="b_track">1</property>
+    </transition>
+  </tractor>
+</mlt>

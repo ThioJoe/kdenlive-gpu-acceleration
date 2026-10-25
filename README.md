@@ -69,7 +69,10 @@ To uninstall, delete `libmltgpufx.so` and the `gpufx` folder.
 
 The programs of the extracted folder also work when started directly, such
 as `usr/bin/melt` for renders from the command line: MLT loads its modules,
-gpufx included, from the folder next to the program.
+gpufx included, from the folder next to the program. Without a display (over
+SSH, for example), set `QT_QPA_PLATFORM=offscreen`: MLT's Qt module, which
+Transform, Drop Shadow and track compositing need, does not load otherwise,
+and melt renders without those effects.
 
 The packages of Linux distributions and the Flatpak are not covered. With
 Kdenlive from a distribution, the module can be built from source against

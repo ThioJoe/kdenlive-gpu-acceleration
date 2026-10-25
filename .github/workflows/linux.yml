@@ -268,6 +268,43 @@ jobs:
           "$root/usr/bin/gpufx_settings_test" "$PWD/screenshot/settings-page.png" 2>&1 | tee settings-test.log
           rm "$root/usr/bin/gpufx_test" "$root/usr/bin/gpufx_settings_test"
 
+      # A project rendered by the AppImage's melt, as from the command line,
+      # with and without the GPU: the same frames, but colors within one
+      # level where Qt's drawing is approximate (see README.md)
+      - name: Render a project with melt
+        run: |
+          root=$KDENLIVE_ROOT
+          mkdir -p render
+          cp source/tests/render_check.mlt render/
+          "$root/usr/bin/ffmpeg" -loglevel error -f lavfi -i testsrc2=size=640x360:rate=30 -t 1 -pix_fmt yuv420p render/render_check.y4m
+          export QT_QPA_PLATFORM=offscreen GPUFX_CONFIG_FILE=/nonexistent
+          export GPUFX_CUDA_LIBRARY="$PWD/build/tests/libgpufx_mockcuda.so"
+          for mode in cpu gpu; do
+            if [ "$mode" = cpu ]; then switch=MLT_GPUFX=0; else switch=MLT_GPUFX_DEBUG=1; fi
+            env "$switch" "$root/usr/bin/melt" -verbose render/render_check.mlt \
+              -consumer avformat:render/$mode.yuv f=rawvideo pix_fmt=yuv422p an=1 real_time=-1 > render/$mode.log 2>&1
+          done
+          echo "frames on the GPU: $(grep -c '\[gpufx\].*on GPU' render/gpu.log)"
+          if grep -E 'failed to load|requires a X11|does not match' render/cpu.log render/gpu.log; then
+            echo "::error::melt could not render the project as it should"
+            exit 1
+          fi
+          if ! grep -q '\[gpufx\].*on GPU' render/gpu.log; then
+            echo "::error::Nothing of the project was rendered on the GPU"
+            exit 1
+          fi
+          python3 - render/cpu.yuv render/gpu.yuv <<'EOF'
+          import sys
+          cpu, gpu = (open(name, 'rb').read() for name in sys.argv[1:3])
+          if len(cpu) != len(gpu) or not cpu:
+              sys.exit(f'::error::The renders differ in size: {len(cpu)} and {len(gpu)} bytes')
+          worst = max(abs(a - b) for a, b in zip(cpu, gpu))
+          differing = sum(a != b for a, b in zip(cpu, gpu))
+          print(f'{len(cpu)} bytes, {differing} differ, by at most {worst}')
+          if worst > 1:
+              sys.exit('::error::The GPU render differs from the CPU render')
+          EOF
+
       - name: Package
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
