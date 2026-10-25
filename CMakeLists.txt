@@ -164,7 +164,7 @@ endif()
 # Windows builds, usr/lib/mlt-7 in its AppImage (-DGPUFX_MLT_MODULE_DIR=lib/mlt-7
 # with the prefix <extracted AppImage>/usr), the moduledir of MLT's pkg-config
 # file elsewhere.
-set(GPUFX_MLT_MODULE_DIR "" CACHE PATH "Where to install the gpufx MLT module (defaults to MLT's module directory)")
+set(GPUFX_MLT_MODULE_DIR "" CACHE STRING "Where to install the gpufx MLT module, absolute or relative to the install prefix (defaults to MLT's module directory)")
 set(gpufx_install_dir "${GPUFX_MLT_MODULE_DIR}")
 if(NOT gpufx_install_dir)
     if(WIN32)
