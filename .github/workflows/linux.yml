@@ -383,50 +383,28 @@ jobs:
           root=$KDENLIVE_ROOT
           cp build-page/gpufx/gpufx-settings-selftest.so "$root/usr/lib/mlt-7/gpufx/gpufx-settings.so"
           export GPUFX_CUDA_LIBRARY="$PWD/build/tests/libgpufx_mockcuda.so"
-          # Runs Kdenlive with the check, which saves its report and
-          # screenshot in screenshot/<name>
-          test_kdenlive() {
-            local name=$1 page=$2 status=0
-            # Folders of its own for each run, which the previous run, ended
-            # by the check, does not affect
-            local home="$PWD/kdenlive-home/$name"
-            export XDG_CONFIG_HOME="$home/config" XDG_DATA_HOME="$home/data" XDG_CACHE_HOME="$home/cache" XDG_STATE_HOME="$home/state"
-            mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
-            # Settings of a Kdenlive that ran before: no first run wizard and
-            # no welcome screen. Kdenlive's AppImage has a settings file of
-            # its own.
-            printf '%s\n' "[version]" "version=$KDENLIVE_VERSION" "" "[sdl]" "sdlAudioBackend=sdl2_audio" "" \
-              "[env]" "kdenliverendererpath=$root/usr/bin/kdenlive_render" "" "[startup]" "showWelcome=false" > "$XDG_CONFIG_HOME/kdenlive-appimagerc"
-            export GPUFX_SELFTEST_OUTPUT="$PWD/screenshot/$name"
-            export GPUFX_SELFTEST_PAGE=$page
-            mkdir -p "$GPUFX_SELFTEST_OUTPUT"
-            timeout -k 30 240 dbus-run-session -- xvfb-run -a -s '-screen 0 1920x1080x24' "$root/AppRun" > "$GPUFX_SELFTEST_OUTPUT/kdenlive.log" 2>&1 || status=$?
-            echo "=== $name" >&2
-            cat "$GPUFX_SELFTEST_OUTPUT/kdenlive-report.txt" >&2 2>/dev/null || tail -n 40 "$GPUFX_SELFTEST_OUTPUT/kdenlive.log" >&2
-            # What the check, which ends Kdenlive at once, leaves running
-            local left
-            left=$(pgrep -a -u "$(id -u)" -f "$root|Xvfb|dbus-daemon --session" || true)
-            if [ -n "$left" ]; then
-              echo "left running, stopped:" >&2
-              echo "$left" >&2
-              pkill -KILL -u "$(id -u)" -f "$root|Xvfb|dbus-daemon --session" || true
-              sleep 2
-            fi
-            if [ "$status" = 124 ] || [ "$status" = 137 ]; then
-              echo "did not finish"
-            else
-              echo "exit code $status"
-            fi
-          }
-          # The dialog with the page, then without it, which tells whether a
-          # failure comes from the page or from Kdenlive on the runner
-          with=$(test_kdenlive with-page 1)
-          without=$(test_kdenlive without-page 0)
+          # Folders of Kdenlive's own, with the settings of a Kdenlive that ran
+          # before: no first run wizard and no welcome screen. Kdenlive's
+          # AppImage has a settings file of its own. (Unlike on Windows, there
+          # is no second run without the page: a second Kdenlive stopped at
+          # its splash screen on the runner, even with folders of its own.)
+          home="$PWD/kdenlive-home"
+          export XDG_CONFIG_HOME="$home/config" XDG_DATA_HOME="$home/data" XDG_CACHE_HOME="$home/cache" XDG_STATE_HOME="$home/state"
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
+          printf '%s\n' "[version]" "version=$KDENLIVE_VERSION" "" "[sdl]" "sdlAudioBackend=sdl2_audio" "" \
+            "[env]" "kdenliverendererpath=$root/usr/bin/kdenlive_render" "" "[startup]" "showWelcome=false" > "$XDG_CONFIG_HOME/kdenlive-appimagerc"
+          # The check saves its report and screenshot in screenshot/with-page
+          export GPUFX_SELFTEST_OUTPUT="$PWD/screenshot/with-page"
+          mkdir -p "$GPUFX_SELFTEST_OUTPUT"
+          status=0
+          timeout -k 30 240 dbus-run-session -- xvfb-run -a -s '-screen 0 1920x1080x24' "$root/AppRun" > "$GPUFX_SELFTEST_OUTPUT/kdenlive.log" 2>&1 || status=$?
+          cat "$GPUFX_SELFTEST_OUTPUT/kdenlive-report.txt" 2>/dev/null || tail -n 40 "$GPUFX_SELFTEST_OUTPUT/kdenlive.log"
           cp build-page/gpufx/gpufx-settings.so "$root/usr/lib/mlt-7/gpufx/gpufx-settings.so"
-          echo "with the page: $with"
-          echo "without the page: $without"
-          if [ "$with" != "exit code 0" ]; then
-            echo "::error::The check in Kdenlive failed: $with"
+          if [ "$status" = 124 ] || [ "$status" = 137 ]; then
+            echo "::error::The check in Kdenlive did not finish"
+            exit 1
+          elif [ "$status" != 0 ]; then
+            echo "::error::The check in Kdenlive failed: exit code $status"
             exit 1
           fi
 
