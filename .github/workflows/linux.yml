@@ -141,9 +141,12 @@ jobs:
       - name: Check the versions of glibc and libstdc++ the files need
         run: |
           find "$KDENLIVE_ROOT" -type f -exec file {} + | grep ': *ELF' | cut -d: -f1 > kdenlive-elf.txt
+          # The versions every file of the AppImage needs (objdump fails on
+          # the files without dynamic symbols)
+          xargs -a kdenlive-elf.txt objdump -T > kdenlive-symbols.txt 2> /dev/null || true
           status=0
           for prefix in GLIBC GLIBCXX CXXABI; do
-            theirs=$(xargs -a kdenlive-elf.txt objdump -T 2>/dev/null | grep -oE "\b${prefix}_[0-9.]+" | sort -Vu | tail -n 1)
+            theirs=$(grep -oE "\b${prefix}_[0-9.]+" kdenlive-symbols.txt | sort -Vu | tail -n 1)
             for file in build/libmltgpufx.so build-page/gpufx/gpufx-settings.so; do
               ours=$(objdump -T "$file" | grep -oE "\b${prefix}_[0-9.]+" | sort -Vu | tail -n 1)
               echo "$(basename "$file"): $prefix ${ours:-none}, Kdenlive's files: $theirs"
