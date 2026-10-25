@@ -834,6 +834,22 @@ void testChains(mlt_profile profile)
         check(stats.misuse == 0, "chain: %llu invalid CUDA calls", (unsigned long long)stats.misuse);
         check(!result.pixels.empty(), "chain: no output");
 
+        // A frame goes to and from the GPU through page-locked memory (not
+        // with MOCKCUDA_NO_PINNED), and threads wait for the GPU on an event
+        const Image large = makeImage(400, 300, 2);
+        const std::vector<FilterSpec> shadow = {{"dropshadow", {{"radius", "6"}}}};
+        expectSame(profile, shadow, large, false);
+        g_mock.reset();
+        render(profile, shadow, large, false);
+        const MockCudaStats largeStats = g_mock.stats();
+        const char *noPinned = getenv("MOCKCUDA_NO_PINNED");
+        const uint64_t pinned = noPinned && noPinned[0] && strcmp(noPinned, "0") != 0 ? 0 : 1;
+        check(largeStats.downloads == 1 && largeStats.pinnedUploads == pinned && largeStats.pinnedDownloads == pinned,
+              "page-locked copies: %llu of %llu uploads and %llu of %llu downloads, expected %llu each", (unsigned long long)largeStats.pinnedUploads,
+              (unsigned long long)largeStats.uploads, (unsigned long long)largeStats.pinnedDownloads, (unsigned long long)largeStats.downloads,
+              (unsigned long long)pinned);
+        check(largeStats.eventWaits > 0, "no thread waited for the GPU on an event");
+
         // A lightweight effect on its own stays on the CPU
         g_mock.reset();
         render(profile, {{"brightness", {{"level", "0.5"}}}}, input, false);

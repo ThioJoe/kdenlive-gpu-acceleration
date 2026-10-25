@@ -176,6 +176,24 @@ bool takeFlag(mlt_properties properties, const char *name)
     return false;
 }
 
+/** mlt_destructor of the memory of allocateImage() */
+void releaseImage(void *ptr)
+{
+    if (ptr && !Runtime::instance().recycleHost(ptr)) {
+        mlt_pool_release(ptr);
+    }
+}
+
+/** Memory for an image that the GPU writes and MLT then keeps: page-locked
+ *  while the pool has room, so that the image is downloaded straight into it.
+ *  Must be called with the context current, released by releaseImage(). */
+uint8_t *allocateImage(size_t bytes)
+{
+    // Room past the end, as MLT's pool gives, for code that reads a little beyond
+    void *pinned = Runtime::instance().allocateHost(bytes + 64);
+    return static_cast<uint8_t *>(pinned ? pinned : mlt_pool_alloc(int(bytes)));
+}
+
 void attachDeviceImage(mlt_properties properties, std::unique_ptr<DeviceImage> image)
 {
     auto *box = new DeviceImageBox{std::move(image)};
@@ -370,16 +388,16 @@ CUresult deliverYuv422(GpuScope &scope, CUdeviceptr rgba, mlt_frame frame, int w
     const int fullRange = 0; // see deliversYuv422()
     const int size = width * height * 2;
     const int alphaSize = width * height;
-    auto *yuv = static_cast<uint8_t *>(mlt_pool_alloc(size));
-    auto *alpha = static_cast<uint8_t *>(mlt_pool_alloc(alphaSize));
+    auto *yuv = allocateImage(size_t(size));
+    auto *alpha = allocateImage(size_t(alphaSize));
     CUresult res = yuv && alpha ? convertRgbaToYuv422(scope, rgba, width, height, colorspace, fullRange, yuv, alpha) : CUDA_ERROR_OUT_OF_MEMORY;
     if (res != CUDA_SUCCESS) {
-        mlt_pool_release(yuv);
-        mlt_pool_release(alpha);
+        releaseImage(yuv);
+        releaseImage(alpha);
         return res;
     }
-    mlt_frame_set_alpha(frame, alpha, alphaSize, mlt_pool_release);
-    mlt_frame_set_image(frame, yuv, size, mlt_pool_release);
+    mlt_frame_set_alpha(frame, alpha, alphaSize, releaseImage);
+    mlt_frame_set_image(frame, yuv, size, releaseImage);
     mlt_properties_set_int(properties, "colorspace", colorspace);
     mlt_properties_set_int(properties, "full_range", fullRange);
     mlt_properties_set_int(properties, "format", mlt_image_yuv422);
@@ -537,13 +555,13 @@ int runOnGpu(mlt_frame frame, mlt_filter filter, mlt_get_image cpuGetImage, cons
                         return 0;
                     }
                 } else {
-                    auto *result = static_cast<uint8_t *>(mlt_pool_alloc(int(outBytes)));
+                    auto *result = allocateImage(outBytes);
                     res = result ? scope.download(result, out.ptr(), outBytes) : CUDA_ERROR_OUT_OF_MEMORY;
                     if (res == CUDA_SUCCESS) {
                         res = scope.synchronize();
                     }
                     if (res == CUDA_SUCCESS) {
-                        mlt_frame_set_image(frame, result, int(outBytes), mlt_pool_release);
+                        mlt_frame_set_image(frame, result, int(outBytes), releaseImage);
                         *image = result;
                         *format = mlt_image_rgba;
                         *width = outW;
@@ -553,7 +571,7 @@ int runOnGpu(mlt_frame frame, mlt_filter filter, mlt_get_image cpuGetImage, cons
                         return 0;
                     }
                     if (result) {
-                        mlt_pool_release(result);
+                        releaseImage(result);
                     }
                 }
             }
@@ -961,13 +979,13 @@ int runTransitionOnGpu(mlt_frame aFrame, mlt_get_image cpuGetImage, const Transi
                     return 0;
                 }
             } else if (res == CUDA_SUCCESS) {
-                auto *result = static_cast<uint8_t *>(mlt_pool_alloc(int(bytes)));
+                auto *result = allocateImage(bytes);
                 res = result ? scope.download(result, out.ptr(), bytes) : CUDA_ERROR_OUT_OF_MEMORY;
                 if (res == CUDA_SUCCESS) {
                     res = scope.synchronize();
                 }
                 if (res == CUDA_SUCCESS) {
-                    mlt_frame_set_image(aFrame, result, int(bytes), mlt_pool_release);
+                    mlt_frame_set_image(aFrame, result, int(bytes), releaseImage);
                     mlt_frame_set_image(bFrame, nullptr, 0, nullptr);
                     *image = result;
                     *format = mlt_image_rgba;
@@ -978,7 +996,7 @@ int runTransitionOnGpu(mlt_frame aFrame, mlt_get_image cpuGetImage, const Transi
                     return 0;
                 }
                 if (result) {
-                    mlt_pool_release(result);
+                    releaseImage(result);
                 }
             }
             runtime.handleError(res, descriptor.service);
@@ -1184,7 +1202,9 @@ int decodeBridgeGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *for
                 const size_t bytes = size_t(w) * size_t(h) * 4;
                 DeviceBuffer rgba;
                 res = convertYuv420ToRgba(scope, source, rgba);
-                auto *result = res == CUDA_SUCCESS ? static_cast<uint8_t *>(mlt_pool_alloc(int(bytes))) : nullptr;
+                // Page-locked only for a download: the host image standing for a GPU image is not filled
+                auto *result =
+                    res != CUDA_SUCCESS ? nullptr : callerWantsDevice ? static_cast<uint8_t *>(mlt_pool_alloc(int(bytes))) : allocateImage(bytes);
                 if (res == CUDA_SUCCESS && !result) {
                     res = CUDA_ERROR_OUT_OF_MEMORY;
                 }
@@ -1196,7 +1216,7 @@ int decodeBridgeGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *for
                 }
                 if (res == CUDA_SUCCESS) {
                     // With the caller on the GPU the host image only stands for the GPU one
-                    mlt_frame_set_image(frame, result, int(bytes), mlt_pool_release);
+                    mlt_frame_set_image(frame, result, int(bytes), releaseImage);
                     if (source.alpha) {
                         // Now in the RGBA image
                         mlt_frame_set_alpha(frame, nullptr, 0, nullptr);
@@ -1219,7 +1239,7 @@ int decodeBridgeGetImage(mlt_frame frame, uint8_t **image, mlt_image_format *for
                     logDebug("avformat: %dx%d converted to RGBA on GPU%s", w, h, callerWantsDevice ? ", kept on GPU" : "");
                     return 0;
                 }
-                mlt_pool_release(result);
+                releaseImage(result);
             }
         }
         Runtime::instance().handleError(res, "avformat");

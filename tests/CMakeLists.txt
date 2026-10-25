@@ -28,8 +28,11 @@ add_dependencies(gpufx_test mltgpufx gpufx_mockcuda)
 add_test(NAME gpufx COMMAND gpufx_test)
 add_test(NAME gpufx_no_gpu COMMAND gpufx_test --no-gpu)
 add_test(NAME gpufx_settings_off COMMAND gpufx_test --settings-off)
+# Without page-locked memory, frames are copied from and to MLT's memory
+add_test(NAME gpufx_pageable COMMAND gpufx_test)
 set_tests_properties(gpufx gpufx_settings_off PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 set_tests_properties(gpufx_no_gpu PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MOCKCUDA_NO_DEVICE=1")
+set_tests_properties(gpufx_pageable PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MOCKCUDA_NO_PINNED=1")
 
 # The settings page in a settings dialog made like Kdenlive's
 if(TARGET gpufx-settings)

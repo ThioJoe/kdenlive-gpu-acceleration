@@ -150,6 +150,11 @@ the final frame is downloaded once. This includes Kdenlive's tracks, each of
 which MLT wraps in a tractor of its own: the result of a clip's accelerated
 effects is passed through the track's tractor on the GPU.
 
+Frames are copied to and from the GPU through page-locked memory, which the
+GPU reads and writes on its own: a downloaded frame is written straight into
+the memory MLT then keeps (see `GPUFX_PINNED_MB` below). A thread waiting for
+the GPU sleeps instead of keeping a CPU core busy.
+
 The same cases as for Transform stay on the CPU (blend modes, 10-bit,
 rotation with *Distort*, scaling down with MLT 7.38). MLT 7.41 only exists as
 development versions (Kdenlive 26.08 ships one), which do not all size the
@@ -250,6 +255,7 @@ The module also reads these environment variables:
 | `MLT_GPUFX_QTBLEND=force` | Accelerate Transform with MLT versions newer than the module knows |
 | `GPUFX_CUDA_DEVICE=n`     | Use the n-th CUDA device (default 0) |
 | `GPUFX_POOL_MB=n`         | Size of the GPU memory kept for reuse (default: 1/8 of the GPU memory, at most 1 GiB) |
+| `GPUFX_PINNED_MB=n`       | At most this much page-locked memory for frames on their way to and from the GPU, which the GPU copies faster and without the CPU (default 512, `0` uses MLT's memory) |
 
 Applications linking MLT can also set the MLT global property
 `gpufx.enabled` to `0` or `1` at any time, which overrides the settings file.

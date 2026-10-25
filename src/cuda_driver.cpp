@@ -90,6 +90,14 @@ bool CudaDriver::load(std::string &error)
     ok &= resolve(library, LaunchKernel, "cuLaunchKernel");
     resolve(library, GetErrorName, "cuGetErrorName");
     resolve(library, GetErrorString, "cuGetErrorString");
+    if (!resolve(library, MemHostAlloc, "cuMemHostAlloc") || !resolve(library, MemFreeHost, "cuMemFreeHost")) {
+        MemHostAlloc = nullptr;
+        MemFreeHost = nullptr;
+    }
+    if (!resolve(library, EventCreate, "cuEventCreate") || !resolve(library, EventRecord, "cuEventRecord") ||
+        !resolve(library, EventSynchronize, "cuEventSynchronize")) {
+        EventCreate = nullptr;
+    }
 
     if (!ok) {
         error = std::string("The NVIDIA driver (") + name + ") is too old: some CUDA functions are missing";

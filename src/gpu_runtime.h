@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -66,8 +67,22 @@ public:
     /** Returns memory to the pool. Safe from any thread, no CUDA call. */
     void recycle(CUdeviceptr ptr, size_t bytes);
 
-    CUresult acquireStream(CUstream *stream);
-    void recycleStream(CUstream stream);
+    /** A stream, and an event to wait for it without spinning (null if the
+     *  driver has no events). */
+    CUresult acquireStream(CUstream *stream, CUevent *event);
+    void recycleStream(CUstream stream, CUevent event);
+
+    /** Page-locked host memory from the pool, which the GPU reads and writes
+     *  by DMA without the driver copying the data through a buffer of its
+     *  own. Null when the pool is at its limit or the driver cannot allocate
+     *  it. Must be called with the context current. */
+    void *allocateHost(size_t bytes);
+    /** Returns memory of allocateHost() to the pool and returns true, or
+     *  returns false if ptr does not come from it. Safe from any thread, no
+     *  CUDA call. */
+    bool recycleHost(void *ptr);
+    /** True if ptr is the start of memory of allocateHost() in use. */
+    bool isHost(const void *ptr);
 
     uint64_t gpuFrames() const { return m_gpuFrames.load(); }
     uint64_t cpuFrames() const { return m_cpuFrames.load(); }
@@ -100,7 +115,17 @@ private:
     size_t m_poolLimit = 0;
 
     std::mutex m_streamMutex;
-    std::vector<CUstream> m_streams;
+    std::vector<std::pair<CUstream, CUevent>> m_streams;
+
+    struct HostBlock
+    {
+        size_t bytes;
+        bool inUse;
+    };
+    std::mutex m_hostMutex;
+    std::map<const void *, HostBlock> m_hostBlocks;
+    size_t m_hostBytes = 0;
+    size_t m_hostLimit = 0;
 
     std::atomic<uint64_t> m_gpuFrames{0};
     std::atomic<uint64_t> m_cpuFrames{0};
@@ -165,6 +190,9 @@ public:
      *  stream has been synchronized, in the destructor. */
     void deferRecycle(CUdeviceptr ptr, size_t bytes);
 
+    /** A large src is first copied to page-locked memory, unless it is
+     *  memory of Runtime::allocateHost(), which must then stay valid until
+     *  the stream is synchronized. */
     CUresult upload(CUdeviceptr dst, const void *src, size_t bytes);
     CUresult download(void *dst, CUdeviceptr src, size_t bytes);
     CUresult copy(CUdeviceptr dst, CUdeviceptr src, size_t bytes);
@@ -200,9 +228,11 @@ private:
     Runtime &m_runtime;
     GpuScope *m_previous = nullptr;
     CUstream m_stream = nullptr;
+    CUevent m_event = nullptr;
     bool m_pushed = false;
     bool m_ok = false;
     std::vector<std::pair<CUdeviceptr, size_t>> m_deferred;
+    std::vector<void *> m_staging;
 };
 
 } // namespace gpufx

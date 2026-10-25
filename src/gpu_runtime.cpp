@@ -41,6 +41,9 @@ bool isRecoverable(CUresult result)
     return result == CUDA_ERROR_OUT_OF_MEMORY || result == CUDA_ERROR_INVALID_VALUE;
 }
 
+// Uploads from this size on go through page-locked memory
+constexpr size_t kStagingBytes = size_t(256) << 10;
+
 thread_local GpuScope *t_scope = nullptr;
 
 } // namespace
@@ -165,6 +168,14 @@ bool Runtime::initialize()
     }
     m_poolLimit = std::max<size_t>(limit, size_t(64) << 20);
 
+    // Page-locked memory holds the frames on their way to and from the GPU,
+    // including downloaded frames that wait in MLT's queues
+    size_t hostLimit = size_t(512) << 20;
+    if (const char *mb = getenv("GPUFX_PINNED_MB")) {
+        hostLimit = size_t(std::max(0, atoi(mb))) << 20;
+    }
+    m_hostLimit = m_cu.MemHostAlloc ? hostLimit : 0;
+
     char summary[512];
     snprintf(summary, sizeof(summary), "Using %s (compute %d.%d, %zu MiB, driver %d.%d)", m_device.name.c_str(), m_device.computeMajor, m_device.computeMinor,
              m_device.totalMemory >> 20, m_device.driverVersion / 1000, (m_device.driverVersion % 1000) / 10);
@@ -259,23 +270,94 @@ void Runtime::trimPool(size_t keepBytes)
     }
 }
 
-CUresult Runtime::acquireStream(CUstream *stream)
+CUresult Runtime::acquireStream(CUstream *stream, CUevent *event)
 {
     {
         std::lock_guard<std::mutex> lock(m_streamMutex);
         if (!m_streams.empty()) {
-            *stream = m_streams.back();
+            *stream = m_streams.back().first;
+            *event = m_streams.back().second;
             m_streams.pop_back();
             return CUDA_SUCCESS;
         }
     }
-    return m_cu.StreamCreate(stream, CU_STREAM_NON_BLOCKING);
+    *event = nullptr;
+    const CUresult res = m_cu.StreamCreate(stream, CU_STREAM_NON_BLOCKING);
+    // With the context's default scheduling a thread waiting for the stream
+    // spins on a CPU core, while one waiting for this event sleeps
+    if (res == CUDA_SUCCESS && m_cu.EventCreate && m_cu.EventCreate(event, CU_EVENT_BLOCKING_SYNC | CU_EVENT_DISABLE_TIMING) != CUDA_SUCCESS) {
+        *event = nullptr;
+    }
+    return res;
 }
 
-void Runtime::recycleStream(CUstream stream)
+void Runtime::recycleStream(CUstream stream, CUevent event)
 {
     std::lock_guard<std::mutex> lock(m_streamMutex);
-    m_streams.push_back(stream);
+    m_streams.emplace_back(stream, event);
+}
+
+void *Runtime::allocateHost(size_t bytes)
+{
+    const size_t size = roundAllocation(bytes);
+    std::vector<void *> released;
+    bool fits = false;
+    {
+        std::lock_guard<std::mutex> lock(m_hostMutex);
+        for (auto &block : m_hostBlocks) {
+            if (!block.second.inUse && block.second.bytes == size) {
+                block.second.inUse = true;
+                return const_cast<void *>(block.first);
+            }
+        }
+        // Make room with the unused blocks of other sizes
+        for (auto it = m_hostBlocks.begin(); it != m_hostBlocks.end() && m_hostBytes + size > m_hostLimit;) {
+            if (it->second.inUse) {
+                ++it;
+                continue;
+            }
+            released.push_back(const_cast<void *>(it->first));
+            m_hostBytes -= it->second.bytes;
+            it = m_hostBlocks.erase(it);
+        }
+        fits = m_hostBytes + size <= m_hostLimit;
+        if (fits) {
+            m_hostBytes += size;
+        }
+    }
+    for (void *ptr : released) {
+        m_cu.MemFreeHost(ptr);
+    }
+    if (!fits) {
+        return nullptr;
+    }
+    void *ptr = nullptr;
+    const CUresult res = m_cu.MemHostAlloc(&ptr, size, 0);
+    std::lock_guard<std::mutex> lock(m_hostMutex);
+    if (res != CUDA_SUCCESS || !ptr) {
+        m_hostBytes -= size;
+        return nullptr;
+    }
+    m_hostBlocks[ptr] = HostBlock{size, true};
+    return ptr;
+}
+
+bool Runtime::recycleHost(void *ptr)
+{
+    std::lock_guard<std::mutex> lock(m_hostMutex);
+    auto it = m_hostBlocks.find(ptr);
+    if (it == m_hostBlocks.end()) {
+        return false;
+    }
+    it->second.inUse = false;
+    return true;
+}
+
+bool Runtime::isHost(const void *ptr)
+{
+    std::lock_guard<std::mutex> lock(m_hostMutex);
+    auto it = m_hostBlocks.find(ptr);
+    return it != m_hostBlocks.end() && it->second.inUse;
 }
 
 CUresult DeviceBuffer::allocate(size_t bytes)
@@ -323,9 +405,10 @@ GpuScope::GpuScope()
         return;
     }
     m_pushed = true;
-    res = m_runtime.acquireStream(&m_stream);
+    res = m_runtime.acquireStream(&m_stream, &m_event);
     if (res != CUDA_SUCCESS) {
         m_stream = nullptr;
+        m_event = nullptr;
         m_runtime.handleError(res, "cuStreamCreate");
         return;
     }
@@ -336,12 +419,15 @@ GpuScope::~GpuScope()
 {
     CudaDriver &cu = m_runtime.cu();
     if (m_stream) {
-        cu.StreamSynchronize(m_stream);
-        m_runtime.recycleStream(m_stream);
+        synchronize();
+        m_runtime.recycleStream(m_stream, m_event);
     }
     t_scope = m_previous;
     for (const auto &block : m_deferred) {
         m_runtime.recycle(block.first, block.second);
+    }
+    for (void *staging : m_staging) {
+        m_runtime.recycleHost(staging);
     }
     if (m_pushed) {
         CUcontext previous = nullptr;
@@ -356,6 +442,15 @@ void GpuScope::deferRecycle(CUdeviceptr ptr, size_t bytes)
 
 CUresult GpuScope::upload(CUdeviceptr dst, const void *src, size_t bytes)
 {
+    // From pageable memory the driver copies the data to a buffer of its own
+    // and waits for each part of it to reach the GPU
+    if (bytes >= kStagingBytes && !m_runtime.isHost(src)) {
+        if (void *staging = m_runtime.allocateHost(bytes)) {
+            memcpy(staging, src, bytes);
+            m_staging.push_back(staging);
+            src = staging;
+        }
+    }
     return m_runtime.cu().MemcpyHtoDAsync(dst, src, bytes, m_stream);
 }
 
@@ -376,7 +471,12 @@ CUresult GpuScope::fill(CUdeviceptr dst, unsigned char value, size_t bytes)
 
 CUresult GpuScope::synchronize()
 {
-    return m_runtime.cu().StreamSynchronize(m_stream);
+    CudaDriver &cu = m_runtime.cu();
+    if (m_event) {
+        const CUresult res = cu.EventRecord(m_event, m_stream);
+        return res == CUDA_SUCCESS ? cu.EventSynchronize(m_event) : res;
+    }
+    return cu.StreamSynchronize(m_stream);
 }
 
 CUresult GpuScope::launchRaw(KernelId id, unsigned gridX, unsigned gridY, unsigned blockX, unsigned blockY, void **params)

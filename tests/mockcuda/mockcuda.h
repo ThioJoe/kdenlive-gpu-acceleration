@@ -27,6 +27,10 @@ struct MockCudaStats
     uint64_t streams;
     uint64_t liveAllocations;
     uint64_t misuse; // API calls the real driver would reject
+    uint64_t pinnedUploads;   // from page-locked memory
+    uint64_t pinnedDownloads; // to page-locked memory
+    uint64_t hostAllocations; // of page-locked memory
+    uint64_t eventWaits;
 };
 
 enum MockCudaOp { MOCKCUDA_ALLOC, MOCKCUDA_UPLOAD, MOCKCUDA_DOWNLOAD, MOCKCUDA_LAUNCH, MOCKCUDA_OP_COUNT };

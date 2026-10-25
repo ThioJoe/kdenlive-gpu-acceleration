@@ -30,6 +30,7 @@ using CUcontext = struct CUctx_st *;
 using CUmodule = struct CUmod_st *;
 using CUfunction = struct CUfunc_st *;
 using CUstream = struct CUstream_st *;
+using CUevent = struct CUevent_st *;
 
 constexpr CUresult CUDA_SUCCESS = 0;
 constexpr CUresult CUDA_ERROR_INVALID_VALUE = 1;
@@ -48,6 +49,8 @@ constexpr int CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75;
 constexpr int CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76;
 
 constexpr unsigned int CU_STREAM_NON_BLOCKING = 0x1;
+constexpr unsigned int CU_EVENT_BLOCKING_SYNC = 0x1;
+constexpr unsigned int CU_EVENT_DISABLE_TIMING = 0x2;
 
 struct CudaDriver
 {
@@ -78,6 +81,13 @@ struct CudaDriver
     // Optional, only used for better error messages
     CUresult(GPUFX_CUDAAPI *GetErrorName)(CUresult error, const char **name) = nullptr;
     CUresult(GPUFX_CUDAAPI *GetErrorString)(CUresult error, const char **text) = nullptr;
+    // Optional: page-locked host memory, and events to wait for a stream
+    // without spinning
+    CUresult(GPUFX_CUDAAPI *MemHostAlloc)(void **ptr, size_t bytes, unsigned int flags) = nullptr;
+    CUresult(GPUFX_CUDAAPI *MemFreeHost)(void *ptr) = nullptr;
+    CUresult(GPUFX_CUDAAPI *EventCreate)(CUevent *event, unsigned int flags) = nullptr;
+    CUresult(GPUFX_CUDAAPI *EventRecord)(CUevent event, CUstream stream) = nullptr;
+    CUresult(GPUFX_CUDAAPI *EventSynchronize)(CUevent event) = nullptr;
 
     /** Loads the driver library and resolves the entry points.
      *  The library can be overridden with the GPUFX_CUDA_LIBRARY environment

@@ -16,6 +16,7 @@
  * Environment:
  *  MOCKCUDA_NO_DEVICE=1   report no CUDA device
  *  MOCKCUDA_INIT_ERROR=n  make cuInit() return n
+ *  MOCKCUDA_NO_PINNED=1   make cuMemHostAlloc() fail
  */
 
 #include "mockcuda.h"
@@ -58,6 +59,7 @@ struct State
     std::mutex mutex;
     std::map<std::string, GpufxTrampoline> kernels;
     std::map<uintptr_t, size_t> allocations;
+    std::map<uintptr_t, size_t> hostAllocations;
     MockCudaStats stats{};
     int failAfter[MOCKCUDA_OP_COUNT] = {0};
     CUresult failWith[MOCKCUDA_OP_COUNT] = {0};
@@ -90,16 +92,21 @@ CUresult injectedFailure(MockCudaOp op)
     return kSuccess;
 }
 
-bool validRange(uintptr_t ptr, size_t bytes)
+bool inRange(const std::map<uintptr_t, size_t> &blocks, uintptr_t ptr, size_t bytes)
 {
-    State &s = state();
-    std::lock_guard<std::mutex> lock(s.mutex);
-    auto it = s.allocations.upper_bound(ptr);
-    if (it == s.allocations.begin()) {
+    auto it = blocks.upper_bound(ptr);
+    if (it == blocks.begin()) {
         return false;
     }
     --it;
     return ptr >= it->first && ptr + bytes <= it->first + it->second;
+}
+
+bool validRange(uintptr_t ptr, size_t bytes)
+{
+    State &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    return inRange(s.allocations, ptr, bytes);
 }
 
 void complain(const char *what)
@@ -336,6 +343,9 @@ MOCKCUDA_EXPORT CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dst, const void *src, 
     std::lock_guard<std::mutex> lock(s.mutex);
     s.stats.uploads++;
     s.stats.uploadedBytes += bytes;
+    if (inRange(s.hostAllocations, uintptr_t(src), bytes)) {
+        s.stats.pinnedUploads++;
+    }
     return kSuccess;
 }
 
@@ -357,6 +367,9 @@ MOCKCUDA_EXPORT CUresult cuMemcpyDtoHAsync_v2(void *dst, CUdeviceptr src, size_t
     std::lock_guard<std::mutex> lock(s.mutex);
     s.stats.downloads++;
     s.stats.downloadedBytes += bytes;
+    if (inRange(s.hostAllocations, uintptr_t(dst), bytes)) {
+        s.stats.pinnedDownloads++;
+    }
     return kSuccess;
 }
 
@@ -405,6 +418,85 @@ MOCKCUDA_EXPORT CUresult cuStreamCreate(void **stream, unsigned int)
 
 MOCKCUDA_EXPORT CUresult cuStreamSynchronize(void *)
 {
+    return kSuccess;
+}
+
+MOCKCUDA_EXPORT CUresult cuMemHostAlloc(void **ptr, size_t bytes, unsigned int)
+{
+    if (t_contextDepth <= 0) {
+        complain("cuMemHostAlloc without context");
+        return kInvalidContext;
+    }
+    const char *noPinned = getenv("MOCKCUDA_NO_PINNED");
+    if (noPinned && noPinned[0] && strcmp(noPinned, "0") != 0) {
+        return kOutOfMemory;
+    }
+    void *memory = malloc(bytes);
+    if (!memory) {
+        return kOutOfMemory;
+    }
+    memset(memory, 0xcd, bytes);
+    State &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.hostAllocations[uintptr_t(memory)] = bytes;
+    s.stats.hostAllocations++;
+    *ptr = memory;
+    return kSuccess;
+}
+
+MOCKCUDA_EXPORT CUresult cuMemFreeHost(void *ptr)
+{
+    if (t_contextDepth <= 0) {
+        complain("cuMemFreeHost without context");
+        return kInvalidContext;
+    }
+    State &s = state();
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        auto it = s.hostAllocations.find(uintptr_t(ptr));
+        if (it == s.hostAllocations.end()) {
+            fprintf(stderr, "mockcuda: cuMemFreeHost of unknown pointer\n");
+            s.stats.misuse++;
+            return kInvalidValue;
+        }
+        s.hostAllocations.erase(it);
+    }
+    free(ptr);
+    return kSuccess;
+}
+
+MOCKCUDA_EXPORT CUresult cuEventCreate(void **event, unsigned int)
+{
+    if (t_contextDepth <= 0) {
+        complain("cuEventCreate without context");
+        return kInvalidContext;
+    }
+    static int events[64];
+    static int next = 0;
+    State &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    *event = &events[next++ % 64];
+    return kSuccess;
+}
+
+MOCKCUDA_EXPORT CUresult cuEventRecord(void *event, void *)
+{
+    if (t_contextDepth <= 0 || !event) {
+        complain("cuEventRecord without context or event");
+        return kInvalidContext;
+    }
+    return kSuccess;
+}
+
+MOCKCUDA_EXPORT CUresult cuEventSynchronize(void *event)
+{
+    if (!event) {
+        complain("cuEventSynchronize without event");
+        return kInvalidValue;
+    }
+    State &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.stats.eventWaits++;
     return kSuccess;
 }
 
