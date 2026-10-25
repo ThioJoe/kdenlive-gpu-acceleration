@@ -14,7 +14,8 @@ namespace gpufx {
 /**
  * MLT puts normalizing filters between a producer and everything else: in a
  * Kdenlive clip (an MLT chain), color_transform, fieldorder, crop, rescale
- * (swscale) and resize. Most of the time they leave the image as it is,
+ * (swscale) and resize, and also deinterlace for the producers MLT's loader
+ * creates (Kdenlive's color clips and titles). Most of the time they leave the image as it is,
  * apart from frame properties, but as CPU filters they need it in memory: a
  * decoded video frame left the GPU there, only to go back for the clip's
  * effects or for compositing. Each one is wrapped by the bridge

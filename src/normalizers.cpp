@@ -8,12 +8,14 @@
  * The normalizing filters of MLT that the bridge lets an image through on the
  * GPU (see normalizer.h). What they do to the frame and its image is that of
  * MLT's code (filter_color_transform.c, filter_fieldorder.c, filter_crop.c,
- * filter_rescale.c, filter_resize.c of src/modules/core), which is the same
- * from MLT 7.40 to 7.43 for everything used here.
+ * filter_rescale.c, filter_resize.c of src/modules/core, and
+ * filter_deinterlace.c of src/modules/xine), which is the same from MLT 7.40
+ * to 7.43 for everything used here.
  */
 
 #include "convert.h"
 #include "normalizer.h"
+#include "stills.h"
 
 #include <cmath>
 #include <cstring>
@@ -41,6 +43,58 @@ bool colorTransformBefore(NormalizerCall &call)
 
 bool passFetched(NormalizerCall &call, int fetchedWidth, int fetchedHeight)
 {
+    call.outWidth = fetchedWidth;
+    call.outHeight = fetchedHeight;
+    return true;
+}
+
+/* ==========================================================================
+ * deinterlace (xine's, which MLT's loader attaches to the producers it
+ * creates, unlike chains): deinterlaces interlaced frames when the consumer
+ * wants progressive ones, leaves progressive frames as they are. Let
+ * through for the still producers, whose frames are progressive before
+ * their image is fetched, when the frame has no neighbours for yadif.
+ * ========================================================================== */
+
+bool deinterlaceBefore(NormalizerCall &call)
+{
+    auto filter = static_cast<mlt_filter>(call.entries[0]);
+    mlt_properties filterProperties = MLT_FILTER_PROPERTIES(filter);
+    mlt_properties properties = call.properties;
+    mlt_producer producer = mlt_frame_get_original_producer(call.frame);
+    if (!producer || !findStill(mlt_properties_get(MLT_PRODUCER_PROPERTIES(producer), "mlt_service")) ||
+        mlt_properties_get_int(properties, "progressive") != 1 || mlt_properties_get_data(properties, "previous frame", nullptr) ||
+        mlt_properties_get_data(properties, "next frame", nullptr)) {
+        return false;
+    }
+    if (mlt_properties_get_int(properties, "consumer.progressive") && !mlt_properties_get_int(properties, "test_image")) {
+        // The first frame for yadif is deinterlaced with linearblend: none
+        // of them changes a progressive frame
+        const char *method = mlt_properties_get(filterProperties, "method");
+        if (const char *frameMethod = mlt_properties_get(properties, "consumer.deinterlacer")) {
+            method = frameMethod;
+        }
+        if ((!method || !strcmp(method, "yadif") || !strcmp(method, "yadif-nospatial")) && !mlt_properties_get_int(filterProperties, "_notfirst")) {
+            mlt_properties_set_int(filterProperties, "_notfirst", 1);
+        }
+    }
+    call.fetchWidth = call.width;
+    call.fetchHeight = call.height;
+    return true;
+}
+
+bool deinterlaceAfter(NormalizerCall &call, int fetchedWidth, int fetchedHeight)
+{
+    auto filter = static_cast<mlt_filter>(call.entries[0]);
+    mlt_properties properties = call.properties;
+    if (mlt_properties_get_int(properties, "consumer.progressive") && !mlt_properties_get_int(properties, "test_image")) {
+        // Make sure that others know the frame is deinterlaced
+        mlt_properties_set_int(properties, "progressive", 1);
+    }
+    // Signal that the previous and next frames are not needed
+    if (auto service = static_cast<mlt_service>(mlt_properties_get_data(MLT_FILTER_PROPERTIES(filter), "service", nullptr))) {
+        mlt_properties_set_int(MLT_SERVICE_PROPERTIES(service), "_need_previous_next", 0);
+    }
     call.outWidth = fetchedWidth;
     call.outHeight = fetchedHeight;
     return true;
@@ -459,6 +513,7 @@ int resizeWork(NormalizerCall &call, uint8_t **image, int *width, int *height)
 
 const NormalizerDescriptor kNormalizers[] = {
     {"color_transform", nullptr, 1, colorTransformBefore, passFetched, nullptr, nullptr},
+    {"deinterlace", nullptr, 1, deinterlaceBefore, deinterlaceAfter, nullptr, nullptr},
     {"fieldorder", nullptr, 0, fieldOrderBefore, fieldOrderAfter, nullptr, fieldOrderWork},
     {"crop", nullptr, 1, cropBefore, passFetched, nullptr, nullptr},
     {"rescale", "swscale", 1, rescaleBefore, rescaleAfter, rescaleGpuWork, rescaleWork},

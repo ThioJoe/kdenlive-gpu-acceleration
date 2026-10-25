@@ -985,15 +985,20 @@ void expectSameOutput(const Output &cpu, const Output &gpu, const std::string &w
         return;
     }
     size_t differences = 0;
+    size_t first = 0;
     int maxDiff = 0;
     for (size_t i = 0; i < cpu.data.size(); ++i) {
         const int diff = std::abs(int(cpu.data[i]) - int(gpu.data[i]));
         if (diff) {
-            ++differences;
+            first = differences++ ? first : i;
             maxDiff = std::max(maxDiff, diff);
         }
     }
-    check(maxDiff <= tolerance, "%s: %zu bytes differ (max %d)", what.c_str(), differences, maxDiff);
+    const size_t bytesPerPixel = cpu.data.size() / std::max<size_t>(size_t(cpu.width) * size_t(cpu.height), 1);
+    const size_t pixel = first / std::max<size_t>(bytesPerPixel, 1);
+    check(maxDiff <= tolerance, "%s: %zu bytes differ (max %d), the first at %zu,%zu byte %zu: %d on the CPU, %d on the GPU", what.c_str(), differences, maxDiff,
+          pixel % size_t(std::max(cpu.width, 1)), pixel / size_t(std::max(cpu.width, 1)), first % std::max<size_t>(bytesPerPixel, 1),
+          cpu.data.empty() ? 0 : cpu.data[first], gpu.data.empty() ? 0 : gpu.data[first]);
     check(cpu.alpha == gpu.alpha, "%s: the alpha planes differ (%zu and %zu bytes)", what.c_str(), cpu.alpha.size(), gpu.alpha.size());
     check(cpu.colorspace == gpu.colorspace && cpu.fullRange == gpu.fullRange, "%s: colorspace %d / %d, full range %d / %d", what.c_str(), cpu.colorspace,
           gpu.colorspace, cpu.fullRange, gpu.fullRange);
@@ -1295,10 +1300,12 @@ struct StillRun
 };
 
 StillRun renderStill(mlt_profile profile, const char *service, const char *resource, const Properties &producerProperties,
-                     const std::vector<FilterSpec> &specs, bool cpu, const std::vector<int> &positions)
+                     const std::vector<FilterSpec> &specs, bool cpu, const std::vector<int> &positions, bool loader)
 {
     StillRun run;
-    mlt_producer producer = mlt_factory_producer(profile, service, resource);
+    // MLT's loader adds its normalizing filters, as for a project's producers
+    const std::string name = std::string(service) + ":" + (resource ? resource : "");
+    mlt_producer producer = loader ? mlt_factory_producer(profile, nullptr, name.c_str()) : mlt_factory_producer(profile, service, resource);
     if (!producer) {
         return run;
     }
@@ -1307,7 +1314,7 @@ StillRun renderStill(mlt_profile profile, const char *service, const char *resou
     }
     mlt_properties_set_int(MLT_PRODUCER_PROPERTIES(producer), "_gpufx.disable", cpu ? 1 : 0);
     // The image conversions of a Kdenlive clip
-    mlt_filter converter = mlt_factory_filter(profile, "avcolor_space", nullptr);
+    mlt_filter converter = loader ? nullptr : mlt_factory_filter(profile, "avcolor_space", nullptr);
     if (converter) {
         mlt_producer_attach(producer, converter);
     }
@@ -1348,12 +1355,14 @@ void testStills(mlt_profile profile)
     if (!hasFilters(blur)) {
         return;
     }
-    // A picture for qimage, in a format Qt always reads
+    // A picture for qimage, in a format Qt always reads. 16:9, so that it is
+    // scaled to an even width: MLT's conversion of an odd width to YUV 4:2:2
+    // (by avdeinterlace) leaves part of the last line unwritten.
     const std::string ppm = tempPath("gpufx_still.ppm");
     if (FILE *file = fopen(ppm.c_str(), "wb")) {
-        fprintf(file, "P6\n%d %d\n255\n", 120, 80);
-        for (int y = 0; y < 80; ++y) {
-            for (int x = 0; x < 120; ++x) {
+        fprintf(file, "P6\n%d %d\n255\n", 128, 72);
+        for (int y = 0; y < 72; ++y) {
+            for (int x = 0; x < 128; ++x) {
                 const unsigned char pixel[3] = {uint8_t(x * 2), uint8_t(y * 3), uint8_t((x * y) & 255)};
                 fwrite(pixel, 1, 3, file);
             }
@@ -1377,13 +1386,18 @@ void testStills(mlt_profile profile)
         Properties properties;
         // Whether the picture is kept on the GPU
         bool kept;
+        // Created by MLT's loader
+        bool loader;
     };
     const Case cases[] = {
-        {"color", "color", "0x3366cc80", {}, true},
+        {"color", "color", "0x3366cc80", {}, true, false},
         // The first frames of each period of 3 frames come from the producer
-        {"qimage", "qimage", ppm, {{"ttl", "3"}}, true},
-        {"title", "kdenlivetitle", "", {{"xmldata", titleXml("0,0,160,90")}}, true},
-        {"animated title", "kdenlivetitle", "", {{"xmldata", titleXml("40,20,80,45")}}, false},
+        {"qimage", "qimage", ppm, {{"ttl", "3"}}, true, false},
+        {"title", "kdenlivetitle", "", {{"xmldata", titleXml("0,0,160,90")}}, true, false},
+        {"animated title", "kdenlivetitle", "", {{"xmldata", titleXml("40,20,80,45")}}, false, false},
+        // Through the deinterlace filter of the loader, when it is xine's
+        {"color from the loader", "color", "0x3366cc80", {}, true, true},
+        {"qimage from the loader", "qimage", ppm, {{"ttl", "3"}}, true, true},
     };
     const std::vector<int> positions = {0, 1, 2, 3, 4, 5, 6, 1, 2, 7};
     for (const Case &c : cases) {
@@ -1393,8 +1407,8 @@ void testStills(mlt_profile profile)
             continue;
         }
         const char *resource = c.resource.empty() ? nullptr : c.resource.c_str();
-        const StillRun cpu = renderStill(profile, c.service, resource, c.properties, blur, true, positions);
-        const StillRun gpu = renderStill(profile, c.service, resource, c.properties, blur, false, positions);
+        const StillRun cpu = renderStill(profile, c.service, resource, c.properties, blur, true, positions, c.loader);
+        const StillRun gpu = renderStill(profile, c.service, resource, c.properties, blur, false, positions, c.loader);
         check(cpu.outputs.size() == positions.size() && gpu.outputs.size() == positions.size(), "%s: %zu and %zu frames", what.c_str(),
               cpu.outputs.size(), gpu.outputs.size());
         if (cpu.outputs.size() != positions.size() || gpu.outputs.size() != positions.size()) {
@@ -1416,7 +1430,8 @@ void testStills(mlt_profile profile)
                   gpu.alphas[i].size());
             kept += gpu.uploads[i] == 0;
         }
-        if (g_mock.active()) {
+        // avdeinterlace, the loader's other choice, converts every image to YUV
+        if (g_mock.active() && (!c.loader || hasFilter("deinterlace"))) {
             // The first call to the producer also sets properties of the
             // producer (color, title) or of the next frames (qimage), so its
             // picture is kept from the third frame on. qimage shows a new

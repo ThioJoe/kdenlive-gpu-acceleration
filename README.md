@@ -193,14 +193,15 @@ back to YUV.
   with the same arithmetic, and stays on the GPU.
 * **Clip size and field order**: MLT puts normalizing filters between each
   clip's producer and its effects (`color_transform`, `fieldorder`, `crop`,
-  `rescale` and `resize`). As CPU filters, they needed every decoded frame in
+  `rescale` and `resize`, and `deinterlace` for color clips and titles). As
+  CPU filters, they needed every decoded frame in
   memory, only for it to go back to the GPU for the clip's effects or the
   compositing. gpufx wraps them: when they leave the image as it is, the most
   common case, it stays on the GPU. Scaling (`rescale`, with libswscale's
   nearest, bilinear, bicubic and Lanczos methods, the ones Kdenlive offers)
   and padding to the profile's aspect ratio (`resize`) run on the GPU.
-  Changing the field order, cropping and the other scaling methods stay on
-  the CPU.
+  Changing the field order, deinterlacing, cropping and the other scaling
+  methods stay on the CPU.
 * **Still images, titles and color clips**: these producers make the same
   picture for every frame, but copy it into a new image each time, which the
   GPU then uploads. When the next stage is on the GPU, gpufx keeps the
