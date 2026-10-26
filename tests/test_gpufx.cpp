@@ -392,6 +392,8 @@ void testStatus(mlt_profile profile, bool expectGpu)
     check(available == (expectGpu ? 1 : 0), "status: available is %d", available);
     const char *effects = mlt_properties_get(properties, "effects");
     check(effects && strstr(effects, "dropshadow"), "status: dropshadow is not listed");
+    const char *version = mlt_properties_get(properties, "version");
+    check(version && *version, "status: no version");
     mlt_filter_close(status);
 }
 

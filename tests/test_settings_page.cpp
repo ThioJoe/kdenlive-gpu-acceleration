@@ -218,6 +218,8 @@ int main(int argc, char **argv)
     if (QString::fromLocal8Bit(qgetenv("GPUFX_CUDA_LIBRARY")).contains(QLatin1String("mockcuda"))) {
         check(status->text().contains(QLatin1String("gpufx emulated GPU")), "the status does not show the emulated GPU");
     }
+    auto *version = dialog->findChild<QLabel *>(QStringLiteral("gpufx_version"));
+    check(version && version->text().startsWith(QLatin1String("Version ")), "the page does not show its version");
 
     // A screenshot of the page
     if (argc > 1) {

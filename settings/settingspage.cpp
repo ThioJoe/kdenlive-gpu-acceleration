@@ -312,6 +312,10 @@ void addPage(KConfigDialog *dialog)
     layout->addWidget(effects);
     layout->addWidget(others);
     layout->addStretch();
+    auto *version = new QLabel(QStringLiteral("Version %1").arg(QLatin1String(GPUFX_VERSION)), page);
+    version->setObjectName(QStringLiteral("gpufx_version"));
+    version->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(version);
     // The switches of the services only matter with GPU processing on
     effects->setEnabled(settings->enabled());
     others->setEnabled(settings->enabled());

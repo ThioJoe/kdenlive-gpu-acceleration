@@ -98,7 +98,7 @@ jobs:
           root=$(cygpath -m "$KDENLIVE_ROOT")
           # Linked to Kdenlive's own libmlt-7.dll, so that a function it does
           # not have fails the build
-          cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGPUFX_KDENLIVE_VERSION="$KDENLIVE_VERSION" \
             -DMLT_INCLUDE_DIR="$(cygpath -m "$PWD/mlt/src")" -DMLT_LIBRARY="$root/bin/libmlt-7.dll"
           cmake --build build
           test -f build/gpufx/gpufx-settings.dll || { echo "::error::The settings page was not built"; exit 1; }
@@ -221,6 +221,7 @@ jobs:
           cmake --install build --prefix "dist/$folder"
           cat > dist/README-gpufx.txt <<EOF
           GPU effects (gpufx) for Kdenlive ${KDENLIVE_VERSION} on Windows
+          Version $(cat build/gpufx-version.txt)
 
           Built from ${GITHUB_REPOSITORY} commit ${GITHUB_SHA}
           by ${RUN_URL}
@@ -326,6 +327,8 @@ jobs:
         run: |
           {
             echo "### GPU effects module for Kdenlive ${KDENLIVE_VERSION} on Windows"
+            echo
+            echo "Version $(cat build/gpufx-version.txt), the name for a release of this build."
             echo
             echo "Download **gpufx-kdenlive-${KDENLIVE_VERSION}-windows** under Artifacts below and unzip it."
             echo "Drag its \`kdenlive-${KDENLIVE_VERSION}_standalone\` folder into the folder that contains your Kdenlive folder and let Windows merge them:"

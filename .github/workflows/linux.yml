@@ -104,7 +104,7 @@ jobs:
           if command -v ninja > /dev/null; then
             generator=Ninja
           fi
-          cmake -S source -B build -G "$generator" -DCMAKE_BUILD_TYPE=Release -DGPUFX_SETTINGS_PAGE=OFF \
+          cmake -S source -B build -G "$generator" -DCMAKE_BUILD_TYPE=Release -DGPUFX_SETTINGS_PAGE=OFF -DGPUFX_KDENLIVE_VERSION="$KDENLIVE_VERSION" \
             -DMLT_INCLUDE_DIR="$PWD/mlt/src" -DMLT_LIBRARY="$KDENLIVE_ROOT/usr/lib/libmlt-7.so.7" -DGPUFX_MLT_MODULE_DIR=lib/mlt-7
           cmake --build build --parallel
           cmake --install build --prefix "$PWD/dist/usr"
@@ -119,15 +119,15 @@ jobs:
           # for the dependencies of Debian's KDE Frameworks
           mkdir -p build-page-mlt
           cp "$KDENLIVE_ROOT/usr/lib/libmlt-7.so.7" build-page-mlt/
-          cmake -S source -B build-page -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          cmake -S source -B build-page -G Ninja -DCMAKE_BUILD_TYPE=Release -DGPUFX_KDENLIVE_VERSION="$KDENLIVE_VERSION" \
             -DMLT_INCLUDE_DIR="$PWD/mlt/src" -DMLT_LIBRARY="$PWD/build-page-mlt/libmlt-7.so.7"
           cmake --build build-page --target gpufx-settings gpufx-settings-selftest gpufx_settings_test
           install -D -m 755 build-page/gpufx/gpufx-settings.so dist/usr/lib/mlt-7/gpufx/gpufx-settings.so
           chown -R "$HOST_IDS" build-page build-page-mlt dist
           EOF
           # Each one fails after 20 minutes rather than hang until the job's limit
-          timeout 20m docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e HOST_IDS="$(id -u):$(id -g)" "$MODULE_IMAGE" bash -eo pipefail build-module.sh
-          timeout 20m docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e HOST_IDS="$(id -u):$(id -g)" -e DEBIAN_FRONTEND=noninteractive "$PAGE_IMAGE" bash -eo pipefail build-page.sh
+          timeout 20m docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e KDENLIVE_VERSION -e HOST_IDS="$(id -u):$(id -g)" "$MODULE_IMAGE" bash -eo pipefail build-module.sh
+          timeout 20m docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e KDENLIVE_VERSION -e HOST_IDS="$(id -u):$(id -g)" -e DEBIAN_FRONTEND=noninteractive "$PAGE_IMAGE" bash -eo pipefail build-page.sh
           test -f build-page/gpufx/gpufx-settings.so || { echo "::error::The settings page was not built"; exit 1; }
 
       - name: Check the module's dependencies
@@ -317,6 +317,7 @@ jobs:
         run: |
           cat > dist/README-gpufx.txt <<EOF
           GPU effects (gpufx) for Kdenlive ${KDENLIVE_VERSION} on Linux, for its AppImage
+          Version $(cat build/gpufx-version.txt)
 
           Built from ${GITHUB_REPOSITORY} commit ${GITHUB_SHA}
           by ${RUN_URL}
@@ -427,6 +428,8 @@ jobs:
         run: |
           {
             echo "### GPU effects module for Kdenlive ${KDENLIVE_VERSION} on Linux (AppImage)"
+            echo
+            echo "Version $(cat build/gpufx-version.txt), the name for a release of this build."
             echo
             echo "Download **gpufx-kdenlive-${KDENLIVE_VERSION}-linux** under Artifacts below and unzip it."
             echo "Extract Kdenlive's AppImage with \`--appimage-extract\` and copy the package's \`usr\` folder into the extracted folder:"

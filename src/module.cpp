@@ -270,6 +270,7 @@ void *statusServiceInit(mlt_profile, mlt_service_type, const char *, const void 
     const bool probe = !(arg && !strcmp(static_cast<const char *>(arg), "noinit"));
     const bool available = probe ? runtime.ensureInitialized() : runtime.usable();
     const DeviceInfo device = runtime.device();
+    mlt_properties_set(properties, "version", GPUFX_VERSION);
     mlt_properties_set(properties, "api", "CUDA");
     mlt_properties_set_int(properties, "available", available);
     mlt_properties_set_int(properties, "enabled", moduleEnabled());

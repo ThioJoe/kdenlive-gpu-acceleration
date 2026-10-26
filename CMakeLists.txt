@@ -26,7 +26,34 @@
 #   cmake --build <builddir> --target gpufx_update_ptx
 
 cmake_minimum_required(VERSION 3.16)
-project(kdenlive-gpu-acceleration LANGUAGES CXX)
+project(kdenlive-gpu-acceleration VERSION 0.2.0 LANGUAGES CXX)
+
+# Each release is built for one Kdenlive release, which comes first in its
+# version: 26.08.2_0.2.0 is version 0.2.0 of the module, built for Kdenlive
+# 26.08.2. The workflows give the Kdenlive release; without it the version is
+# the module's alone.
+set(GPUFX_KDENLIVE_VERSION "" CACHE STRING "The Kdenlive release the build is made for (for example 26.08.2), the first part of its version")
+if(GPUFX_KDENLIVE_VERSION)
+    set(GPUFX_VERSION "${GPUFX_KDENLIVE_VERSION}_${PROJECT_VERSION}")
+else()
+    set(GPUFX_VERSION "${PROJECT_VERSION}")
+endif()
+file(WRITE "${PROJECT_BINARY_DIR}/gpufx-version.txt" "${GPUFX_VERSION}\n")
+message(STATUS "gpufx version ${GPUFX_VERSION}")
+
+# The version and a description in the properties of the Windows DLLs
+if(WIN32)
+    enable_language(RC)
+endif()
+function(gpufx_version_resource target filename description)
+    if(WIN32)
+        set(GPUFX_RC_FILENAME "${filename}")
+        set(GPUFX_RC_DESCRIPTION "${description}")
+        configure_file("${PROJECT_SOURCE_DIR}/cmake/gpufx_version.rc.in" "${CMAKE_CURRENT_BINARY_DIR}/${target}_version.rc" @ONLY)
+        target_sources(${target} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/${target}_version.rc")
+    endif()
+    target_compile_definitions(${target} PRIVATE GPUFX_VERSION="${GPUFX_VERSION}")
+endfunction()
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -154,6 +181,7 @@ add_library(mltgpufx MODULE
     "${CMAKE_CURRENT_BINARY_DIR}/gpufx_ptx.cpp"
 )
 target_link_libraries(mltgpufx PRIVATE Mlt7::mlt ${CMAKE_DL_LIBS})
+gpufx_version_resource(mltgpufx libmltgpufx.dll "GPU effects for Kdenlive (MLT module)")
 set_target_properties(mltgpufx PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON

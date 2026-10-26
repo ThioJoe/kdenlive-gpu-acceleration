@@ -79,6 +79,20 @@ Kdenlive from a distribution, the module can be built from source against
 the distribution's MLT (see [Building](#building)), and installing it into
 MLT's module folder needs root.
 
+## Versions
+
+Each build is made for one Kdenlive release, which comes first in its
+version: `26.08.2_0.2.0` is version 0.2.0 of the module, built for Kdenlive
+26.08.2. Releases are named after it. The version is shown at the bottom of
+the settings page and in the packages' `README-gpufx.txt`, and on Windows in
+the *Details* tab of the DLLs' properties: *Product version* is the full
+version, while *File version*, which only takes numbers, is the module's
+(0.2.0.0).
+
+The module's version is set by `project()` in `CMakeLists.txt`. The
+workflows add the Kdenlive release with `-DGPUFX_KDENLIVE_VERSION`; a build
+without it has the module's version alone.
+
 ## Accelerated effects
 
 | Kdenlive effect                     | MLT service          | Notes |

@@ -16,6 +16,7 @@ foreach(target ${targets})
     add_library(${target} MODULE settingspage.cpp)
     target_include_directories(${target} PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(${target} PRIVATE Qt6::Widgets KF6::ConfigWidgets KF6::ConfigCore)
+    gpufx_version_resource(${target} ${target}.dll "GPU Acceleration page of Kdenlive's settings")
     # Kdenlive's Qt can be older than the one the page is built with, which is
     # fine as long as it has every function the page uses. The tests check that
     # by loading the page with Kdenlive's own libraries.

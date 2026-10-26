@@ -181,7 +181,7 @@ bool Runtime::initialize()
     snprintf(summary, sizeof(summary), "Using %s (compute %d.%d, %zu MiB, driver %d.%d)", m_device.name.c_str(), m_device.computeMajor, m_device.computeMinor,
              m_device.totalMemory >> 20, m_device.driverVersion / 1000, (m_device.driverVersion % 1000) / 10);
     m_status = summary;
-    logInfo("GPU effects: %s", summary);
+    logInfo("GPU effects %s: %s", GPUFX_VERSION, summary);
     return true;
 }
 
