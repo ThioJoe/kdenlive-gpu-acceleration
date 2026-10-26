@@ -129,6 +129,8 @@ jobs:
           timeout 20m docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e KDENLIVE_VERSION -e HOST_IDS="$(id -u):$(id -g)" "$MODULE_IMAGE" bash -eo pipefail build-module.sh
           timeout 20m docker run --rm -v "$PWD:$PWD" -w "$PWD" -e KDENLIVE_ROOT -e KDENLIVE_VERSION -e HOST_IDS="$(id -u):$(id -g)" -e DEBIAN_FRONTEND=noninteractive "$PAGE_IMAGE" bash -eo pipefail build-page.sh
           test -f build-page/gpufx/gpufx-settings.so || { echo "::error::The settings page was not built"; exit 1; }
+          # The version (26.08.2_0.2.0), for the name of the package
+          echo "GPUFX_VERSION=$(cat build/gpufx-version.txt)" >> "$GITHUB_ENV"
 
       - name: Check the module's dependencies
         run: |
@@ -317,7 +319,7 @@ jobs:
         run: |
           cat > dist/README-gpufx.txt <<EOF
           GPU effects (gpufx) for Kdenlive ${KDENLIVE_VERSION} on Linux, for its AppImage
-          Version $(cat build/gpufx-version.txt)
+          Version ${GPUFX_VERSION}
 
           Built from ${GITHUB_REPOSITORY} commit ${GITHUB_SHA}
           by ${RUN_URL}
@@ -362,7 +364,7 @@ jobs:
       - name: Upload the package
         uses: actions/upload-artifact@v4
         with:
-          name: gpufx-kdenlive-${{ env.KDENLIVE_VERSION }}-linux
+          name: gpufx-kdenlive-${{ env.GPUFX_VERSION }}-linux
           path: dist/
           if-no-files-found: error
 
@@ -372,7 +374,7 @@ jobs:
       - name: Upload the tests
         uses: actions/upload-artifact@v4
         with:
-          name: gpufx-tests-kdenlive-${{ env.KDENLIVE_VERSION }}-linux
+          name: gpufx-tests-kdenlive-${{ env.GPUFX_VERSION }}-linux
           path: |
             build/tests/gpufx_test
             build/tests/libgpufx_mockcuda.so
@@ -429,9 +431,9 @@ jobs:
           {
             echo "### GPU effects module for Kdenlive ${KDENLIVE_VERSION} on Linux (AppImage)"
             echo
-            echo "Version $(cat build/gpufx-version.txt), the name for a release of this build."
+            echo "Version ${GPUFX_VERSION}, the name for a release of this build."
             echo
-            echo "Download **gpufx-kdenlive-${KDENLIVE_VERSION}-linux** under Artifacts below and unzip it."
+            echo "Download **gpufx-kdenlive-${GPUFX_VERSION}-linux** under Artifacts below and unzip it."
             echo "Extract Kdenlive's AppImage with \`--appimage-extract\` and copy the package's \`usr\` folder into the extracted folder:"
             echo "it adds \`usr/lib/mlt-7/libmltgpufx.so\` and \`usr/lib/mlt-7/gpufx/gpufx-settings.so\`. \`Tools/install-gpufx.sh\` does this without root."
             echo

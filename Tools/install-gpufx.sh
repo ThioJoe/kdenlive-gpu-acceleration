@@ -14,13 +14,13 @@
 #   <folder>/usr/lib/mlt-7/gpufx/gpufx-settings.so
 # and Kdenlive is then started with <folder>/AppRun.
 #
-# It takes the latest release unless --tag names one (for example v0.2.0),
-# and the build for the Kdenlive version of the folder (from its AppStream
-# data, else from its name) unless --version is given.
+# It takes the newest release with a build for the Kdenlive version of the
+# folder (from its AppStream data, else from its name, unless --version is
+# given), or the release that --tag names (for example 26.08.2_0.2.0).
 #
 # Options:
 #   --version <x.y.z>   Kdenlive version
-#   --tag <tag>         release to take instead of the latest
+#   --tag <tag>         release to take instead of the newest
 #   --package <path>    install this package (a zip from the releases or from
 #                       the workflow's artifacts, or its unzipped folder)
 #                       instead of downloading one
@@ -84,6 +84,17 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+# Downloads $1 into the file $2
+fetch() {
+    if command -v curl > /dev/null; then
+        curl --fail --location --retry 3 --silent --show-error --output "$2" "$1"
+    elif command -v wget > /dev/null; then
+        wget --quiet --tries=3 --output-document="$2" "$1"
+    else
+        fail "Neither curl nor wget is installed."
+    fi
+}
 
 is_kdenlive_folder() {
     [ -f "$1/usr/bin/kdenlive" ] && [ -d "$1/usr/lib/mlt-7" ]
@@ -174,21 +185,27 @@ else
     if [ -n "$package" ]; then
         zip=$package
     else
-        file=gpufx-kdenlive-$version-linux.zip
+        # The package for this Kdenlive version, named after the release's
+        # version (gpufx-kdenlive-26.08.2_0.2.0-linux.zip) or, before 0.2.0,
+        # after the Kdenlive version alone (gpufx-kdenlive-26.08.1-linux.zip)
         if [ -n "$tag" ]; then
-            url=https://github.com/$repo/releases/download/$tag/$file
+            api=https://api.github.com/repos/$repo/releases/tags/$tag
         else
-            url=https://github.com/$repo/releases/latest/download/$file
+            api="https://api.github.com/repos/$repo/releases?per_page=100"
         fi
-        zip=$work/$file
+        fetch "$api" "$work/releases.json" || fail "Cannot get the releases of $repo from $api."
+        pattern="/gpufx-kdenlive-${version//./\\.}(_[0-9]+(\\.[0-9]+)*)?-linux\\.zip\$"
+        # Releases come newest first
+        url=$(grep -o '"browser_download_url": *"[^"]*"' "$work/releases.json" | grep -o 'https://[^"]*' | grep -E "$pattern" | head -n 1 || true)
+        if [ -z "$url" ]; then
+            if [ -n "$tag" ]; then
+                fail "Release $tag has no build for Kdenlive $version on Linux."
+            fi
+            fail "No release has a build for Kdenlive $version on Linux yet."
+        fi
+        zip=$work/${url##*/}
         echo "Downloading $url"
-        if command -v curl > /dev/null; then
-            curl --fail --location --retry 3 --silent --show-error --output "$zip" "$url" || fail "Download failed. The release may have no build for Kdenlive $version."
-        elif command -v wget > /dev/null; then
-            wget --quiet --tries=3 --output-document="$zip" "$url" || fail "Download failed. The release may have no build for Kdenlive $version."
-        else
-            fail "Neither curl nor wget is installed."
-        fi
+        fetch "$url" "$zip" || fail "Download failed."
     fi
     unpacked=$work/package
     mkdir "$unpacked"

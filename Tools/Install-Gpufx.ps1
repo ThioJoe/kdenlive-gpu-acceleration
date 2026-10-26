@@ -7,8 +7,8 @@
       <folder>\lib\mlt\libmltgpufx.dll
       <folder>\lib\mlt\gpufx\gpufx-settings.dll
 
-    It takes the latest release unless -Tag names one (for example v0.1.0), and the
-    build for the Kdenlive version in the folder name unless -KdenliveVersion is given.
+    It takes the newest release with a build for the Kdenlive version in the folder
+    name (or -KdenliveVersion), unless -Tag names a release (for example 26.08.2_0.2.0).
 
     It never waits for input, so it can run unattended: it exits with 0 when
     installed and 1 on any error, with the reason on the error stream.
@@ -51,14 +51,34 @@ try {
         Fail 'Close this Kdenlive first.'
     }
 
-    $file = "gpufx-kdenlive-$KdenliveVersion-windows.zip"
-    if ($Tag) {
-        $url = "https://github.com/$Repo/releases/download/$Tag/$file"
-    } else {
-        $url = "https://github.com/$Repo/releases/latest/download/$file"
-    }
-
+    # The build for this Kdenlive version, named after the release's version
+    # (gpufx-kdenlive-26.08.2_0.2.0-windows.zip) or, before 0.2.0, after the
+    # Kdenlive version alone (gpufx-kdenlive-26.08.1-windows.zip)
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    if ($Tag) {
+        $api = "https://api.github.com/repos/$Repo/releases/tags/$Tag"
+    } else {
+        $api = "https://api.github.com/repos/$Repo/releases?per_page=100"
+    }
+    try {
+        $releases = Invoke-RestMethod -UseBasicParsing -Uri $api
+    } catch {
+        Fail "Cannot get the releases of $Repo from $api ($($_.Exception.Message))."
+    }
+    $pattern = '^gpufx-kdenlive-' + [regex]::Escape($KdenliveVersion) + '(_\d+(\.\d+)*)?-windows\.zip$'
+    $asset = $null
+    # Releases come newest first
+    foreach ($release in $releases) {
+        $asset = $release.assets | Where-Object { $_.name -match $pattern } | Select-Object -First 1
+        if ($asset) { break }
+    }
+    if (-not $asset) {
+        if ($Tag) { Fail "Release $Tag has no build for Kdenlive $KdenliveVersion on Windows." }
+        Fail "No release has a build for Kdenlive $KdenliveVersion on Windows yet."
+    }
+    $file = $asset.name
+    $url = $asset.browser_download_url
+
     $work = Join-Path $env:TEMP "gpufx-install-$PID"
     New-Item -ItemType Directory -Force $work | Out-Null
     $zip = Join-Path $work $file
@@ -66,7 +86,7 @@ try {
     try {
         Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip
     } catch {
-        Fail "Download failed ($($_.Exception.Message)). The release may have no build for Kdenlive $KdenliveVersion."
+        Fail "Download failed ($($_.Exception.Message))."
     }
     Expand-Archive -Force $zip (Join-Path $work 'build')
 

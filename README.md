@@ -24,14 +24,14 @@ Kdenlive's settings dialog for it (see [Settings](#settings)).
 The [Windows workflow](.github/workflows/windows.yml) builds the module and
 its settings page for Kdenlive's Windows standalone build and uploads them as
 an artifact, laid out like Kdenlive's folder. Open the latest run under *Actions*, download
-`gpufx-kdenlive-<version>-windows` and unzip it, then drag its
-`kdenlive-<version>_standalone` folder into the folder that contains your
+`gpufx-kdenlive-<version>-windows` (see [Versions](#versions)) and unzip it, then drag its
+`kdenlive-<Kdenlive version>_standalone` folder into the folder that contains your
 Kdenlive folder and let Windows merge them. It adds
 `lib\mlt\libmltgpufx.dll` and `lib\mlt\gpufx\gpufx-settings.dll`. To
 uninstall, delete `libmltgpufx.dll` and the `gpufx` folder.
 
-Or let [Tools/Install-Gpufx.ps1](Tools/Install-Gpufx.ps1) download the latest
-release for your Kdenlive version and copy both files, given the Kdenlive folder:
+Or let [Tools/Install-Gpufx.ps1](Tools/Install-Gpufx.ps1) download the newest
+release with a build for your Kdenlive version and copy both files, given the Kdenlive folder:
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Tools\Install-Gpufx.ps1 "C:\path\to\kdenlive-26.08.2_standalone"
@@ -45,8 +45,8 @@ user's: no root is needed.
 
 [Tools/install-gpufx.sh](Tools/install-gpufx.sh) does it all. Given the
 AppImage, it extracts it into a folder next to it (`kdenlive-26.08.2` for
-`kdenlive-26.08.2-x86_64.AppImage`), downloads the latest release for that
-Kdenlive version and adds both files. Kdenlive is then started with the
+`kdenlive-26.08.2-x86_64.AppImage`), downloads the newest release with a
+build for that Kdenlive version and adds both files. Kdenlive is then started with the
 `AppRun` file of that folder.
 
 ```
@@ -61,7 +61,7 @@ reason.
 
 By hand: the [Linux workflow](.github/workflows/linux.yml) uploads
 `gpufx-kdenlive-<version>-linux`, which holds a `usr` folder. Extract the
-AppImage with `./kdenlive-<version>-x86_64.AppImage --appimage-extract`
+AppImage with `./kdenlive-<Kdenlive version>-x86_64.AppImage --appimage-extract`
 (which creates a `squashfs-root` folder, to rename as you like), copy the
 package's `usr` folder into it, and start Kdenlive with its `AppRun`. It adds
 `usr/lib/mlt-7/libmltgpufx.so` and `usr/lib/mlt-7/gpufx/gpufx-settings.so`.
@@ -83,8 +83,11 @@ MLT's module folder needs root.
 
 Each build is made for one Kdenlive release, which comes first in its
 version: `26.08.2_0.2.0` is version 0.2.0 of the module, built for Kdenlive
-26.08.2. Releases are named after it. The version is shown at the bottom of
-the settings page and in the packages' `README-gpufx.txt`, and on Windows in
+26.08.2. Releases and their packages are named after it
+(`gpufx-kdenlive-26.08.2_0.2.0-windows.zip`; before 0.2.0, packages were
+named after the Kdenlive version alone). The install scripts take the newest
+release with a package for the Kdenlive version. The version is shown at the
+bottom of the settings page and in the packages' `README-gpufx.txt`, and on Windows in
 the *Details* tab of the DLLs' properties: *Product version* is the full
 version, while *File version*, which only takes numbers, is the module's
 (0.2.0.0).
